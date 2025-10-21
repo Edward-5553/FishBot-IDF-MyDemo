@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+#include <math.h>
+#include <stdbool.h>
 
 ////// Component Part >>>>>>
 #include "led.h"
@@ -15,6 +17,13 @@
 ////// Component Part <<<<<<
 
 static const char *TAG = "MAIN";
+
+/* IMU 位姿滤波状态（Roll/Pitch/Yaw，单位：度） */
+static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
+/* FreeRTOS Tick 计时，用于积分 */
+static TickType_t s_last_tick = 0;
+/* 是否完成位姿初始对准（用加速度静态解算进行初始化） */
+static bool s_pose_initialized = false;
 
 /**
  * @brief       程序入口
@@ -63,36 +72,63 @@ void app_main(void) {
 
   ESP_LOGI(TAG, "进入主循环，周期 500ms");
 
+  /* 初始化积分计时 */
+  s_last_tick = xTaskGetTickCount();
+
   while (1) {
     LED_TOGGLE();
 
     /* 读取并打印温度 */
     float temp_c;
-    ret = lsm6ds3_read_temp_c(&temp_c);
+    esp_err_t ret = lsm6ds3_read_temp_c(&temp_c);
     if (ret == ESP_OK) {
       ESP_LOGI(TAG, "IMU Temp: %.2f C", temp_c);
     } else {
       ESP_LOGW(TAG, "读取温度失败: %s", esp_err_to_name(ret));
     }
 
-    /*
-    // 读取 LSM6DS3 原始数据示例
+    /* 读取原始数据，计算三轴位姿（RPY） */
     lsm6ds3_raw_data_t imu;
     ret = lsm6ds3_read_raw(&imu);
     if (ret == ESP_OK) {
+      /* 计算 dt（秒） */
+      TickType_t now = xTaskGetTickCount();
+      float dt = ((float)(now - s_last_tick)) * (portTICK_PERIOD_MS / 1000.0f);
+      s_last_tick = now;
+
+      /* 单位换算：加速度->g，角速度->dps */
       float ax = lsm6ds3_acc_g_default(imu.acc_x);
       float ay = lsm6ds3_acc_g_default(imu.acc_y);
       float az = lsm6ds3_acc_g_default(imu.acc_z);
       float gx = lsm6ds3_gyro_dps_default(imu.gyro_x);
       float gy = lsm6ds3_gyro_dps_default(imu.gyro_y);
       float gz = lsm6ds3_gyro_dps_default(imu.gyro_z);
-      float tc = lsm6ds3_temp_c(imu.temp_raw);
-      ESP_LOGI(TAG, "Accel[g]: X=%.2f Y=%.2f Z=%.2f | Gyro[dps]: X=%.1f Y=%.1f Z=%.1f | Temp=%.2fC",
-               ax, ay, az, gx, gy, gz, tc);
+
+      /* 基于加速度的倾角（度）：roll = atan2(ay, az)，pitch = atan2(-ax, sqrt(ay^2+az^2)) */
+      float roll_acc  = atan2f(ay, az) * 57.2957795f; /* 180/pi */
+      float pitch_acc = atan2f(-ax, sqrtf(ay * ay + az * az)) * 57.2957795f;
+
+      /* 互补滤波融合加速度与陀螺仪（建议 alpha≈0.98 在高采样率下使用；当前 500ms 周期可将 alpha 调低） */
+      const float alpha = 0.95f; /* 周期较慢时适当降低，增强加速度稳定性 */
+
+      if (!s_pose_initialized) {
+        /* 用静态加速度初始对准 */
+        s_roll = roll_acc;
+        s_pitch = pitch_acc;
+        s_yaw = 0.0f;
+        s_pose_initialized = true;
+      }
+
+      /* 陀螺仪积分 + 互补滤波 */
+      s_roll  = alpha * (s_roll  + gx * dt) + (1.0f - alpha) * roll_acc;
+      s_pitch = alpha * (s_pitch + gy * dt) + (1.0f - alpha) * pitch_acc;
+      s_yaw  += gz * dt; /* 没有磁力计，yaw 仅由陀螺仪积分，随时间可能漂移 */
+
+      ESP_LOGI(TAG, "Pose[deg] Roll=%.2f Pitch=%.2f Yaw=%.2f | Acc[g] X=%.2f Y=%.2f Z=%.2f | Gyro[dps] X=%.1f Y=%.1f Z=%.1f",
+               s_roll, s_pitch, s_yaw, ax, ay, az, gx, gy, gz);
     } else {
-      ESP_LOGW(TAG, "读取 LSM6DS3 失败: %s", esp_err_to_name(ret));
+      ESP_LOGW(TAG, "读取 LSM6DS3 原始数据失败: %s", esp_err_to_name(ret));
     }
-    */
 
     vTaskDelay(pdMS_TO_TICKS(500));
   }
