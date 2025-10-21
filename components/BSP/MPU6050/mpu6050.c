@@ -108,10 +108,32 @@ esp_err_t lsm6ds3_read_raw(lsm6ds3_raw_data_t *out)
     return ESP_OK;
 }
 
+esp_err_t lsm6ds3_read_temp_raw(int16_t *out)
+{
+    if (!out) return ESP_ERR_INVALID_ARG;
+    uint8_t b[2];
+    esp_err_t err = lsm6ds3_read_regs(LSM6DS3_REG_OUT_TEMP_L, b, 2);
+    if (err != ESP_OK) return err;
+    *out = (int16_t)((b[1] << 8) | b[0]);
+    return ESP_OK;
+}
+
+esp_err_t lsm6ds3_read_temp_c(float *out_c)
+{
+    if (!out_c) return ESP_ERR_INVALID_ARG;
+    int16_t raw;
+    esp_err_t err = lsm6ds3_read_temp_raw(&raw);
+    if (err != ESP_OK) return err;
+    *out_c = lsm6ds3_temp_c(raw);
+    return ESP_OK;
+}
+
 float lsm6ds3_temp_c(int16_t temp_raw)
 {
-    /* LSM6DS3: Temp(°C) = 25 + TEMP_OUT/16 */
-    return 25.0f + ((float)temp_raw / 16.0f);
+    /* LSM6DS3/LSM6DSL: Temp(°C) = 25 + TEMP_OUT/256
+     * 参考 ST 官方驱动与社区答复示例：lsm6dsm_from_lsb_to_celsius(lsb) = (lsb/256) + 25
+     */
+    return 25.0f + ((float)temp_raw / 256.0f);
 }
 
 float lsm6ds3_acc_g_default(int16_t raw)

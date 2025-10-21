@@ -53,9 +53,19 @@ esp_err_t lsm6ds3_init_on_bus(i2c_master_bus_handle_t bus, uint8_t i2c_addr, uin
 
 /* 读取加速度、温度、角速度原始值（一次性读 14 字节） */
 esp_err_t lsm6ds3_read_raw(lsm6ds3_raw_data_t *out);
+/* 仅读取温度原始值 */
+esp_err_t lsm6ds3_read_temp_raw(int16_t *out_temp);
+/* 读取并转换为摄氏度 */
+esp_err_t lsm6ds3_read_temp_c(float *out_temp_c);
 
 /* 常用换算函数（按 LSM6DS3 默认量程设置） */
-float lsm6ds3_temp_c(int16_t temp_raw);           /* 摄氏度 */
+/**
+ * 将温度原始值转换为摄氏度
+ * LSM6DS3/LSM6DSL 温度换算：Temp(°C) = 25 + TEMP_OUT/256
+ * 说明：TEMP_OUT 为 16-bit 二补码，典型灵敏度 256 LSB/°C（分辨率约 0.0039°C/LSB），
+ * 在 25°C 附近的读数约为 0。
+ */
+float lsm6ds3_temp_c(int16_t temp_raw);
 float lsm6ds3_acc_g_default(int16_t raw);         /* -> g */
 float lsm6ds3_gyro_dps_default(int16_t raw);      /* -> deg/s */
 

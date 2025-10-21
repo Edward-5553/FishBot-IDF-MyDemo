@@ -65,6 +65,16 @@ void app_main(void) {
 
   while (1) {
     LED_TOGGLE();
+
+    /* 读取并打印温度 */
+    float temp_c;
+    ret = lsm6ds3_read_temp_c(&temp_c);
+    if (ret == ESP_OK) {
+      ESP_LOGI(TAG, "IMU Temp: %.2f C", temp_c);
+    } else {
+      ESP_LOGW(TAG, "读取温度失败: %s", esp_err_to_name(ret));
+    }
+
     /*
     // 读取 LSM6DS3 原始数据示例
     lsm6ds3_raw_data_t imu;
