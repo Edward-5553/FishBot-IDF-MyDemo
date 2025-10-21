@@ -1,4 +1,5 @@
 #include "myi2c.h"
+#include "driver/i2c.h"  /* 使用 i2c_master_probe 进行地址阶段 ACK 探测 */
 static const char *TAG = "IIC";
 
 i2c_master_bus_handle_t bus_handle;     /* 总线句柄 */
@@ -34,5 +35,32 @@ esp_err_t myiic_init(void)
     }
     ESP_ERROR_CHECK(err);
 
+    return ESP_OK;
+}
+
+
+esp_err_t myiic_scan(void)
+{
+    if (bus_handle == NULL) {
+        ESP_LOGE(TAG, "I2C 总线未初始化，无法扫描");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "开始 I2C 扫描 (0x08..0x77, 地址阶段 ACK 探测)...");
+    int found = 0;
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        /* 直接用端口级 API 探测地址阶段 ACK，不需要先 add_device */
+        esp_err_t probe = i2c_master_probe(IIC_NUM_PORT, addr, 100);
+        if (probe == ESP_OK) {
+            ESP_LOGI(TAG, "发现设备: 0x%02X", addr);
+            found++;
+        } else {
+            ESP_LOGV(TAG, "[0x%02X] NACK: %s", addr, esp_err_to_name(probe));
+        }
+    }
+    if (found == 0) {
+        ESP_LOGW(TAG, "扫描结束，未发现设备");
+    } else {
+        ESP_LOGI(TAG, "扫描结束，共发现 %d 个设备", found);
+    }
     return ESP_OK;
 }

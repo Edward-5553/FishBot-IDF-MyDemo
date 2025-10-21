@@ -1,10 +1,12 @@
 set(src_dirs
             IIC
-            LED)
+            LED
+            MPU6050)
 
 set(include_dirs
             IIC
-            LED)
+            LED
+            MPU6050)
 
 set(requires
             driver
