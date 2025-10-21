@@ -10,6 +10,7 @@
 
 ////// Component Part >>>>>>
 #include "led.h"
+#include "myi2c.h"
 ////// Component Part <<<<<<
 
 static const char *TAG = "MAIN";
@@ -39,7 +40,14 @@ void app_main(void) {
 
   ESP_LOGI(TAG, "LED 初始化...");
   led_init();                        /* LED初始化 */
-
+  ESP_LOGI(TAG, "IIC 初始化...");
+  esp_log_level_set("IIC", ESP_LOG_DEBUG);
+  ret = myiic_init();               /* 初始化IIC0 */  
+  if (ret == ESP_OK) {
+    ESP_LOGI(TAG, "IIC 总线初始化成功");
+  } else {
+    ESP_LOGE(TAG, "IIC 总线初始化失败: 0x%x", ret);
+  }
   ESP_LOGI(TAG, "进入主循环，周期 500ms");
 
   while (1) {

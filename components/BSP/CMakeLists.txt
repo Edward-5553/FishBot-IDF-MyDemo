@@ -1,7 +1,9 @@
-set(src_dirs  
+set(src_dirs
+            IIC
             LED)
 
 set(include_dirs
+            IIC
             LED)
 
 set(requires
