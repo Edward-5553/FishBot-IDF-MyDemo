@@ -1,12 +1,14 @@
 set(src_dirs
             IIC
             LED
-            MPU6050)
+            MPU6050
+            OLED)
 
 set(include_dirs
             IIC
             LED
-            MPU6050)
+            MPU6050
+            OLED)
 
 set(requires
             driver

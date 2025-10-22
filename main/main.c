@@ -14,6 +14,7 @@
 #include "led.h"
 #include "myi2c.h"
 #include "mpu6050.h"
+#include "oled.h"
 ////// Component Part <<<<<<
 
 static const char *TAG = "MAIN";
@@ -24,6 +25,37 @@ static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
 static TickType_t s_last_tick = 0;
 /* 是否完成位姿初始对准（用加速度静态解算进行初始化） */
 static bool s_pose_initialized = false;
+static bool s_oled_ready = false;
+static float s_gbias_x = 0.0f, s_gbias_y = 0.0f, s_gbias_z = 0.0f; /* 陀螺零速偏移（dps） */
+
+/* 静止校准陀螺零速偏移（请在调用前保持设备静止）*/
+static void calibrate_gyro_bias_static(int samples, int delay_ms)
+{
+    float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
+    int got = 0;
+    ESP_LOGI(TAG, "开始陀螺零偏静止校准，请保持设备静止，采样次数=%d", samples);
+    for (int i = 0; i < samples; ++i) {
+        lsm6ds3_raw_data_t imu;
+        esp_err_t r = lsm6ds3_read_raw(&imu);
+        if (r == ESP_OK) {
+            float gx = lsm6ds3_gyro_dps_default(imu.gyro_x);
+            float gy = lsm6ds3_gyro_dps_default(imu.gyro_y);
+            float gz = lsm6ds3_gyro_dps_default(imu.gyro_z);
+            sum_x += gx; sum_y += gy; sum_z += gz; ++got;
+        } else {
+            ESP_LOGW(TAG, "校准采样失败: %s", esp_err_to_name(r));
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+    if (got > 0) {
+        s_gbias_x = sum_x / (float)got;
+        s_gbias_y = sum_y / (float)got;
+        s_gbias_z = sum_z / (float)got;
+        ESP_LOGI(TAG, "零偏校准完成: bias[dps] X=%.3f Y=%.3f Z=%.3f (有效样本=%d)", s_gbias_x, s_gbias_y, s_gbias_z, got);
+    } else {
+        ESP_LOGW(TAG, "零偏校准失败：无有效样本");
+    }
+}
 
 /**
  * @brief       程序入口
@@ -66,8 +98,19 @@ void app_main(void) {
   ret = lsm6ds3_init_on_bus(bus_handle, LSM6DS3_I2C_ADDR_DEFAULT, IIC_SPEED_CLK);
   if (ret == ESP_OK) {
     ESP_LOGI(TAG, "LSM6DS3 初始化成功");
+    calibrate_gyro_bias_static(200, 5); /* 启动静止零偏校准：200次，每次5ms，总约1秒 */
   } else {
     ESP_LOGE(TAG, "LSM6DS3 初始化失败: %s", esp_err_to_name(ret));
+  }
+
+  // OLED 初始化与演示
+  ESP_LOGI(TAG, "OLED 初始化...");
+  if (oled_init()) {
+    s_oled_ready = true;
+    ESP_LOGI(TAG, "OLED 初始化成功");
+    oled_clear();
+  } else {
+    ESP_LOGE(TAG, "OLED 初始化失败");
   }
 
   ESP_LOGI(TAG, "进入主循环，周期 500ms");
@@ -80,11 +123,11 @@ void app_main(void) {
 
     /* 读取并打印温度 */
     float temp_c;
-    esp_err_t ret = lsm6ds3_read_temp_c(&temp_c);
-    if (ret == ESP_OK) {
+    esp_err_t temp_ret = lsm6ds3_read_temp_c(&temp_c);
+    if (temp_ret == ESP_OK) {
       ESP_LOGI(TAG, "IMU Temp: %.2f C", temp_c);
     } else {
-      ESP_LOGW(TAG, "读取温度失败: %s", esp_err_to_name(ret));
+      ESP_LOGW(TAG, "读取温度失败: %s", esp_err_to_name(temp_ret));
     }
 
     /* 读取原始数据，计算三轴位姿（RPY） */
@@ -100,9 +143,9 @@ void app_main(void) {
       float ax = lsm6ds3_acc_g_default(imu.acc_x);
       float ay = lsm6ds3_acc_g_default(imu.acc_y);
       float az = lsm6ds3_acc_g_default(imu.acc_z);
-      float gx = lsm6ds3_gyro_dps_default(imu.gyro_x);
-      float gy = lsm6ds3_gyro_dps_default(imu.gyro_y);
-      float gz = lsm6ds3_gyro_dps_default(imu.gyro_z);
+      float gx = lsm6ds3_gyro_dps_default(imu.gyro_x) - s_gbias_x;
+      float gy = lsm6ds3_gyro_dps_default(imu.gyro_y) - s_gbias_y;
+      float gz = lsm6ds3_gyro_dps_default(imu.gyro_z) - s_gbias_z;
 
       /* 基于加速度的倾角（度）：roll = atan2(ay, az)，pitch = atan2(-ax, sqrt(ay^2+az^2)) */
       float roll_acc  = atan2f(ay, az) * 57.2957795f; /* 180/pi */
@@ -128,6 +171,29 @@ void app_main(void) {
                s_roll, s_pitch, s_yaw, ax, ay, az, gx, gy, gz);
     } else {
       ESP_LOGW(TAG, "读取 LSM6DS3 原始数据失败: %s", esp_err_to_name(ret));
+    }
+
+    // OLED 动态刷新测试：显示温度与姿态
+    if (s_oled_ready) {
+      char line2[22];
+      if (temp_ret == ESP_OK) {
+        snprintf(line2, sizeof(line2), "Temp:%8.2f C    ", temp_c);
+      } else {
+        snprintf(line2, sizeof(line2), "Temp:   N/A      ");
+      }
+      oled_ascii8(0, 2, line2);
+
+      char line3[22];
+      snprintf(line3, sizeof(line3), "Roll:%8.2f deg   ", s_roll);
+      oled_ascii8(0, 3, line3);
+
+      char line4[22];
+      snprintf(line4, sizeof(line4), "Pitch:%8.2f deg  ", s_pitch);
+      oled_ascii8(0, 4, line4);
+
+      char line5[22];
+      snprintf(line5, sizeof(line5), "Yaw:%8.2f deg    ", s_yaw);
+      oled_ascii8(0, 5, line5);
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));
