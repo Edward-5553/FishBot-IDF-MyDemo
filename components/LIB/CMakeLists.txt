@@ -1,20 +1,11 @@
 set(src_dirs
-            IIC
-            LED
-            MPU6050
-            OLED
-            MOTOR)
+            PWM)
 
 set(include_dirs
-            IIC
-            LED
-            MPU6050
-            OLED
-            MOTOR)
+            PWM)
 
 set(requires
             driver
-            LIB
             )
 
 idf_component_register(SRC_DIRS ${src_dirs} INCLUDE_DIRS ${include_dirs} REQUIRES ${requires})

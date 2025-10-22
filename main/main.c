@@ -15,9 +15,13 @@
 #include "myi2c.h"
 #include "mpu6050.h"
 #include "oled.h"
+#include "motor.h"
 ////// Component Part <<<<<<
 
 static const char *TAG = "MAIN";
+
+// 新增：参考 V4 驱动方式，默认使用 COAST（快衰减）以先确保能转动
+#define MOTOR_DEMO_DRIVE_MODE_BRAKE_DEFAULT  0
 
 /* IMU 位姿滤波状态（Roll/Pitch/Yaw，单位：度） */
 static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
@@ -27,6 +31,18 @@ static TickType_t s_last_tick = 0;
 static bool s_pose_initialized = false;
 static bool s_oled_ready = false;
 static float s_gbias_x = 0.0f, s_gbias_y = 0.0f, s_gbias_z = 0.0f; /* 陀螺零速偏移（dps） */
+static motor_t s_motor1, s_motor2, s_motor3, s_motor4;            /* 四路电机对象 */
+// 轮位映射：motor1=左前, motor2=右前, motor3=左后, motor4=右后（保留以支持后续方向控制）
+#define MOTOR_FL s_motor1 // 左前 Front-Left
+#define MOTOR_FR s_motor2 // 右前 Front-Right
+#define MOTOR_RL s_motor3 // 左后 Rear-Left
+#define MOTOR_RR s_motor4 // 右后 Rear-Right
+// 每个轮位的“逻辑正转”极性（+1：permille>0 为正转；-1：permille<0 为正转）（保留以支持后续方向控制）
+#define MOTOR_POL_FL (-1)
+#define MOTOR_POL_FR (+1)
+#define MOTOR_POL_RL (-1)
+#define MOTOR_POL_RR (+1)
+
 
 /* 静止校准陀螺零速偏移（请在调用前保持设备静止）*/
 static void calibrate_gyro_bias_static(int samples, int delay_ms)
@@ -113,6 +129,42 @@ void app_main(void) {
     ESP_LOGE(TAG, "OLED 初始化失败");
   }
 
+  // MOTOR 初始化（LEDC 低速模式，5kHz，13-bit），GPIO映射来自用户提供
+  ESP_LOGI(TAG, "MOTOR 初始化...");
+  ret = motor_init(&s_motor1, GPIO_NUM_4,  GPIO_NUM_5,  LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
+  if (ret != ESP_OK) ESP_LOGE(TAG, "Motor1 初始化失败: %s", esp_err_to_name(ret));
+  ret = motor_init(&s_motor2, GPIO_NUM_15, GPIO_NUM_16, LEDC_CHANNEL_2, LEDC_CHANNEL_3, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
+  if (ret != ESP_OK) ESP_LOGE(TAG, "Motor2 初始化失败: %s", esp_err_to_name(ret));
+  ret = motor_init(&s_motor3, GPIO_NUM_8,  GPIO_NUM_3,  LEDC_CHANNEL_4, LEDC_CHANNEL_5, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
+  if (ret != ESP_OK) ESP_LOGE(TAG, "Motor3 初始化失败: %s", esp_err_to_name(ret));
+  ret = motor_init(&s_motor4, GPIO_NUM_46, GPIO_NUM_9,  LEDC_CHANNEL_6, LEDC_CHANNEL_7, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
+  if (ret != ESP_OK) ESP_LOGE(TAG, "Motor4 初始化失败: %s", esp_err_to_name(ret));
+
+#if MOTOR_DEMO_DRIVE_MODE_BRAKE_DEFAULT
+  motor_set_drive_mode(&s_motor1, MOTOR_DRIVE_BRAKE);
+  motor_set_drive_mode(&s_motor2, MOTOR_DRIVE_BRAKE);
+  motor_set_drive_mode(&s_motor3, MOTOR_DRIVE_BRAKE);
+  motor_set_drive_mode(&s_motor4, MOTOR_DRIVE_BRAKE);
+#else
+  motor_set_drive_mode(&s_motor1, MOTOR_DRIVE_COAST);
+  motor_set_drive_mode(&s_motor2, MOTOR_DRIVE_COAST);
+  motor_set_drive_mode(&s_motor3, MOTOR_DRIVE_COAST);
+  motor_set_drive_mode(&s_motor4, MOTOR_DRIVE_COAST);
+#endif
+
+  // 默认全部空转停止
+  motor_stop_freewheel(&s_motor1);
+  motor_stop_freewheel(&s_motor2);
+  motor_stop_freewheel(&s_motor3);
+  motor_stop_freewheel(&s_motor4);
+
+  // 初始化四轮 PWM 0% 占空比（保持停止）
+  ESP_LOGI(TAG, "初始化四轮 PWM 0%% 占空比");
+  motor_set_permille(&s_motor1, 0);
+  motor_set_permille(&s_motor2, 0);
+  motor_set_permille(&s_motor3, 0);
+  motor_set_permille(&s_motor4, 0);
+
   ESP_LOGI(TAG, "进入主循环，周期 500ms");
 
   /* 初始化积分计时 */
@@ -195,6 +247,8 @@ void app_main(void) {
       snprintf(line5, sizeof(line5), "Yaw:%8.2f deg    ", s_yaw);
       oled_ascii8(0, 5, line5);
     }
+
+
 
     vTaskDelay(pdMS_TO_TICKS(500));
   }
