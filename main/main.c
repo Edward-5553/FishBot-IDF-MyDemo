@@ -8,6 +8,9 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <stdbool.h>
 
 ////// Component Part >>>>>>
@@ -16,12 +19,67 @@
 #include "mpu6050.h"
 #include "oled.h"
 #include "motor.h"
+// 新增：编码器（A/B 双相，PCNT 计数）
+#include "rotary_encoder.h"
+#include "pid_controller.h"  // 新增：速度 PID 控制器
+#include "driver/pcnt.h"
 ////// Component Part <<<<<<
 
 static const char *TAG = "MAIN";
 
 // 新增：参考 V4 驱动方式，默认使用 COAST（快衰减）以先确保能转动
 #define MOTOR_DEMO_DRIVE_MODE_BRAKE_DEFAULT  0
+// 新增：是否自动执行一次前进/后退方向校验（运行 2s 前进 + 2s 后退）
+#define ROBOT_DIR_TEST_ENABLE                 0
+// 用户测试宏：置1启用MOTOR2占空70%并打印轮速，置0编译移除该测试代码
+#define MOTOR2_SPEED_TEST_ENABLE              0
+// 用户测试宏：置1启用车轮速度 PID 闭环控制（目标速度 m/s）。
+// 为兼容历史，此宏仍沿用原名（开启后将为所有轮子创建 PID 控制，若某些轮子尚未配置编码器，则以右前轮的测量作为临时反馈）。
+#define MOTOR2_PID_TEST_ENABLE                0
+// PID 目标速度（m/s），请根据场景安全设置，初值偏保守
+#define PID_TARGET_SPEED_MPS                  0.20f
+// PID 初始增益（单位：输出permille/速度m/s），请按需要调参
+#define PID_KP                                600.0f
+#define PID_KI                                200.0f
+#define PID_KD                                0.0f
+
+// —— 四轮编码器配置（统一使用宏，便于后期修改）——
+// 说明：
+// 1) 右前轮（FR）原先为固定写法，现改为宏定义形式，默认 FR 使用 PCNT_UNIT_0，A=GPIO17，B=GPIO18。
+// 2) 左前（FL）、左后（RL）、右后（RR）同样通过宏启用与配置；如暂未连接，可将 ENABLE 置0。
+// 3) 若某轮 ENABLE=0 则不会创建该轮编码器；PID 控制时该轮将暂用 FR 的速度作为反馈，待启用后再切换为独立闭环。
+
+// 右前轮（Motor2）编码器：默认 A=GPIO17, B=GPIO18，默认使用 PCNT_UNIT_0
+#define ENCODER_FR_ENABLE 1
+#if ENCODER_FR_ENABLE
+  #define ENC_FR_PCNT_UNIT  PCNT_UNIT_0
+  #define ENC_FR_GPIO_A     GPIO_NUM_17
+  #define ENC_FR_GPIO_B     GPIO_NUM_18
+#endif
+
+// 左前轮（Motor1）编码器：A=GPIO7, B=GPIO6，建议使用 PCNT_UNIT_1
+#define ENCODER_FL_ENABLE 1
+#if ENCODER_FL_ENABLE
+  #define ENC_FL_PCNT_UNIT  PCNT_UNIT_1
+  #define ENC_FL_GPIO_A     GPIO_NUM_7
+  #define ENC_FL_GPIO_B     GPIO_NUM_6
+#endif
+
+// 左后轮（Motor3）编码器：A=GPIO19, B=GPIO20，建议使用 PCNT_UNIT_2
+#define ENCODER_RL_ENABLE 1
+#if ENCODER_RL_ENABLE
+  #define ENC_RL_PCNT_UNIT  PCNT_UNIT_2
+  #define ENC_RL_GPIO_A     GPIO_NUM_19
+  #define ENC_RL_GPIO_B     GPIO_NUM_20
+#endif
+
+// 右后轮（Motor4）编码器：A=GPIO11, B=GPIO10，建议使用 PCNT_UNIT_3
+#define ENCODER_RR_ENABLE 1
+#if ENCODER_RR_ENABLE
+  #define ENC_RR_PCNT_UNIT  PCNT_UNIT_3
+  #define ENC_RR_GPIO_A     GPIO_NUM_11
+  #define ENC_RR_GPIO_B     GPIO_NUM_10
+#endif
 
 /* IMU 位姿滤波状态（Roll/Pitch/Yaw，单位：度） */
 static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
@@ -42,7 +100,29 @@ static motor_t s_motor1, s_motor2, s_motor3, s_motor4;            /* 四路电�
 #define MOTOR_POL_FR (+1)
 #define MOTOR_POL_RL (-1)
 #define MOTOR_POL_RR (+1)
-
+// 新增：统一车辆驱动对象 + 编码器对象（示例：右前轮）
+static robot_drive_t s_rb;                    // 统一驱动对象
+static rotary_encoder_t *s_enc_fr = NULL;     // 右前轮编码器（宏定义：ENC_FR_GPIO_A/ENC_FR_GPIO_B/ENC_FR_PCNT_UNIT）
+static rotary_encoder_t *s_enc_fl = NULL;     // 左前轮编码器（需填写 A/B 引脚）
+static rotary_encoder_t *s_enc_rl = NULL;     // 左后轮编码器（需填写 A/B 引脚）
+static rotary_encoder_t *s_enc_rr = NULL;     // 右后轮编码器（需填写 A/B 引脚）
+static int s_enc_last_cnt = 0;                // 上次计数
+static TickType_t s_enc_last_tick = 0;        // 上次计数时间戳
+static int s_counts_per_rev_cfg = 0;          // 右前轮每圈脉冲数（测得）
+// 新增：方向校验状态机
+static int s_dir_test_state = 0;              // 0:待开始 1:前进中 2:前进结束 3:后退中 4:后退结束
+static TickType_t s_dir_test_ts = 0;          // 当前阶段起始 tick
+static int s_dir_test_start_cnt = 0;          // 阶段起始计数
+static bool s_dir_test_enable = ROBOT_DIR_TEST_ENABLE;
+#if MOTOR2_SPEED_TEST_ENABLE
+static bool s_motor2_test_started = false;    // MOTOR2 70%占空测试是否已启动
+#endif
+// 新增：右前轮速度 PID 控制器状态
+#if MOTOR2_PID_TEST_ENABLE
+static pid_controller_t s_pid_fl, s_pid_fr, s_pid_rl, s_pid_rr;  // 四轮 PID 控制器
+static bool s_pid_all_inited = false;                             // 是否已完成四轮 PID 初始化
+static TickType_t s_pid_last_tick = 0;                            // 统一 PID 采样周期计时
+#endif
 
 /* 静止校准陀螺零速偏移（请在调用前保持设备静止）*/
 static void calibrate_gyro_bias_static(int samples, int delay_ms)
@@ -158,12 +238,71 @@ void app_main(void) {
   motor_stop_freewheel(&s_motor3);
   motor_stop_freewheel(&s_motor4);
 
-  // 初始化四轮 PWM 0% 占空比（保持停止）
-  ESP_LOGI(TAG, "初始化四轮 PWM 0%% 占空比");
-  motor_set_permille(&s_motor1, 0);
-  motor_set_permille(&s_motor2, 0);
-  motor_set_permille(&s_motor3, 0);
-  motor_set_permille(&s_motor4, 0);
+  // 初始化统一驱动对象并保持停止
+  robot_init_drive(&s_rb, &MOTOR_FL, &MOTOR_FR, &MOTOR_RL, &MOTOR_RR, MOTOR_POL_FL, MOTOR_POL_FR, MOTOR_POL_RL, MOTOR_POL_RR);
+  robot_stop(&s_rb);
+
+  // 创建右前轮编码器（使用宏定义，便于后期修改）
+#if ENCODER_FR_ENABLE
+  s_enc_fr = create_rotary_encoder(ENC_FR_PCNT_UNIT, ENC_FR_GPIO_A, ENC_FR_GPIO_B);
+#else
+  s_enc_fr = NULL;
+#endif
+  if (s_enc_fr) {
+    ESP_LOGI(TAG, "右前轮编码器创建成功: PCNT_UNIT_%d, A=GPIO%u, B=GPIO%u", (int)ENC_FR_PCNT_UNIT, (unsigned)ENC_FR_GPIO_A, (unsigned)ENC_FR_GPIO_B);
+    // 根据用户测量：10圈共 19741 脉冲 -> 每圈 ≈ 1974.1，四舍五入为 1974
+    int counts_per_rev = (int)lroundf(19741.0f / 10.0f);
+    s_counts_per_rev_cfg = counts_per_rev;
+    esp_err_t cwret = s_enc_fr->config_wheel(s_enc_fr, 65.0f, counts_per_rev);
+    if (cwret == ESP_OK) {
+      ESP_LOGI(TAG, "轮速换算配置: 直径=65mm, counts_per_rev=%d (来源: 10圈测得19741脉冲)", counts_per_rev);
+    } else {
+      ESP_LOGE(TAG, "轮速换算配置失败: %s", esp_err_to_name(cwret));
+    }
+  } else {
+    ESP_LOGE(TAG, "右前轮编码器创建失败，后续速度/方向打印不可用");
+  }
+
+  // 可选：创建左前/左后/右后编码器（需在顶部填写 GPIO 与 PCNT 单元并将 ENABLE 置1）
+#if ENCODER_FL_ENABLE
+  s_enc_fl = create_rotary_encoder(ENC_FL_PCNT_UNIT, ENC_FL_GPIO_A, ENC_FL_GPIO_B);
+  if (s_enc_fl) {
+    esp_err_t cwret = s_enc_fl->config_wheel(s_enc_fl, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(19741.0f / 10.0f));
+    ESP_LOGI(TAG, "左前轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_FL_PCNT_UNIT, (int)ENC_FL_GPIO_A, (int)ENC_FL_GPIO_B);
+    if (cwret != ESP_OK) {
+      ESP_LOGW(TAG, "左前轮速度换算配置失败: %s", esp_err_to_name(cwret));
+    }
+  } else {
+    ESP_LOGE(TAG, "左前轮编码器创建失败（请检查 PCNT 单元与 GPIO 配置）");
+  }
+#endif
+
+#if ENCODER_RL_ENABLE
+  s_enc_rl = create_rotary_encoder(ENC_RL_PCNT_UNIT, ENC_RL_GPIO_A, ENC_RL_GPIO_B);
+  if (s_enc_rl) {
+    esp_err_t cwret = s_enc_rl->config_wheel(s_enc_rl, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(19741.0f / 10.0f));
+    ESP_LOGI(TAG, "左后轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_RL_PCNT_UNIT, (int)ENC_RL_GPIO_A, (int)ENC_RL_GPIO_B);
+    if (cwret != ESP_OK) {
+      ESP_LOGW(TAG, "左后轮速度换算配置失败: %s", esp_err_to_name(cwret));
+    }
+  } else {
+    ESP_LOGE(TAG, "左后轮编码器创建失败（请检查 PCNT 单元与 GPIO 配置）");
+  }
+#endif
+
+#if ENCODER_RR_ENABLE
+  s_enc_rr = create_rotary_encoder(ENC_RR_PCNT_UNIT, ENC_RR_GPIO_A, ENC_RR_GPIO_B);
+  if (s_enc_rr) {
+    esp_err_t cwret = s_enc_rr->config_wheel(s_enc_rr, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(19741.0f / 10.0f));
+    ESP_LOGI(TAG, "右后轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_RR_PCNT_UNIT, (int)ENC_RR_GPIO_A, (int)ENC_RR_GPIO_B);
+    if (cwret != ESP_OK) {
+      ESP_LOGW(TAG, "右后轮速度换算配置失败: %s", esp_err_to_name(cwret));
+    }
+  } else {
+    ESP_LOGE(TAG, "右后轮编码器创建失败（请检查 PCNT 单元与 GPIO 配置）");
+  }
+#endif
+  s_enc_last_tick = xTaskGetTickCount();
 
   ESP_LOGI(TAG, "进入主循环，周期 500ms");
 
@@ -225,27 +364,164 @@ void app_main(void) {
       ESP_LOGW(TAG, "读取 LSM6DS3 原始数据失败: %s", esp_err_to_name(ret));
     }
 
-    // OLED 动态刷新测试：显示温度与姿态
-    if (s_oled_ready) {
-      char line2[22];
-      if (temp_ret == ESP_OK) {
-        snprintf(line2, sizeof(line2), "Temp:%8.2f C    ", temp_c);
-      } else {
-        snprintf(line2, sizeof(line2), "Temp:   N/A      ");
+    // 新增：编码器速度/方向打印（右前轮）
+    if (s_enc_fr) {
+      TickType_t now_enc = xTaskGetTickCount();
+      float dt_enc = ((float)(now_enc - s_enc_last_tick)) * (portTICK_PERIOD_MS / 1000.0f);
+      s_enc_last_tick = now_enc;
+      int cnt = s_enc_fr->get_counter_value(s_enc_fr);
+      int delta = cnt - s_enc_last_cnt;
+      s_enc_last_cnt = cnt;
+      float pps = (dt_enc > 0.0f) ? (delta / dt_enc) : 0.0f;  // pulses per second
+      float v_mps = s_enc_fr->get_speed_mps(s_enc_fr);        // 轮速（m/s），带符号
+      const char *dir = (delta > 0) ? "DIR+" : (delta < 0) ? "DIR-" : "STOP";
+      ESP_LOGI(TAG, "FR Enc: cnt=%d delta=%d speed=%.1fpps v=%.3fm/s %s", cnt, delta, pps, v_mps, dir);
+    }
+
+    // 额外打印：各轮速度（若已配置编码器）
+    {
+      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
+      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) : 0.0f;
+      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
+      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
+      // 只有在至少一个编码器存在时打印该汇总行
+      if (s_enc_fl || s_enc_fr || s_enc_rl || s_enc_rr) {
+        ESP_LOGI(TAG, "Wheels v[m/s]: FL=%s%.3f FR=%s%.3f RL=%s%.3f RR=%s%.3f",
+                 (s_enc_fl ? "" : "N/A:"), v_fl,
+                 (s_enc_fr ? "" : "N/A:"), v_fr,
+                 (s_enc_rl ? "" : "N/A:"), v_rl,
+                 (s_enc_rr ? "" : "N/A:"), v_rr);
+        ESP_LOGI(TAG, "Encoders present: FL=%d FR=%d RL=%d RR=%d",
+                 s_enc_fl ? 1 : 0, s_enc_fr ? 1 : 0, s_enc_rl ? 1 : 0, s_enc_rr ? 1 : 0);
       }
-      oled_ascii8(0, 2, line2);
+    }
 
-      char line3[22];
-      snprintf(line3, sizeof(line3), "Roll:%8.2f deg   ", s_roll);
-      oled_ascii8(0, 3, line3);
+#if MOTOR2_SPEED_TEST_ENABLE
+    // 一键测试：MOTOR2(右前轮)占空比70%，并打印轮速
+    if (!s_motor2_test_started) {
+      motor_set_permille(&s_motor2, 700);
+      s_motor2_test_started = true;
+      ESP_LOGI(TAG, "MOTOR2 70%%占空测试启动: permille=700 (右前轮)");
+    }
+    if (s_enc_fr) {
+      float v_test = s_enc_fr->get_speed_mps(s_enc_fr);
+      ESP_LOGI(TAG, "MOTOR2 TEST: wheel speed v=%.3f m/s", v_test);
+    } else {
+      ESP_LOGW(TAG, "MOTOR2 TEST: 未检测到右前轮编码器，无法打印轮速");
+    }
+#endif
 
-      char line4[22];
-      snprintf(line4, sizeof(line4), "Pitch:%8.2f deg  ", s_pitch);
-      oled_ascii8(0, 4, line4);
-
-      char line5[22];
-      snprintf(line5, sizeof(line5), "Yaw:%8.2f deg    ", s_yaw);
-      oled_ascii8(0, 5, line5);
+#if MOTOR2_PID_TEST_ENABLE
+    // 四轮速度 PID 闭环控制（目标速度 PID_TARGET_SPEED_MPS）
+    if (!s_pid_all_inited) {
+      // 输出限幅：电机 permille [-1000, 1000]；积分限幅缩小一些避免长时间饱和
+      pid_init(&s_pid_fl, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
+      pid_init(&s_pid_fr, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
+      pid_init(&s_pid_rl, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
+      pid_init(&s_pid_rr, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
+      // 为提升鲁棒性，导数项使用测量值并加一阶低通滤波
+      pid_set_d_on_measurement(&s_pid_fl, true); pid_set_d_filter_alpha(&s_pid_fl, 0.9f);
+      pid_set_d_on_measurement(&s_pid_fr, true); pid_set_d_filter_alpha(&s_pid_fr, 0.9f);
+      pid_set_d_on_measurement(&s_pid_rl, true); pid_set_d_filter_alpha(&s_pid_rl, 0.9f);
+      pid_set_d_on_measurement(&s_pid_rr, true); pid_set_d_filter_alpha(&s_pid_rr, 0.9f);
+      s_pid_last_tick = xTaskGetTickCount();
+      s_pid_all_inited = true;
+      ESP_LOGI(TAG, "四轮 PID 启动: target=%.3f m/s, Kp=%.1f Ki=%.1f Kd=%.1f", PID_TARGET_SPEED_MPS, PID_KP, PID_KI, PID_KD);
+    }
+    // 计算 dt
+    TickType_t now_pid = xTaskGetTickCount();
+    float dt_pid = ((float)(now_pid - s_pid_last_tick)) * (portTICK_PERIOD_MS / 1000.0f);
+    s_pid_last_tick = now_pid;
+    // 测量各轮速度（若未配置编码器，则临时采用右前轮速度作为反馈以保持一致）
+    float v_fr = s_enc_fr ? s_enc_fr->get_speed_mps(s_enc_fr) : 0.0f;
+    float v_fl = s_enc_fl ? s_enc_fl->get_speed_mps(s_enc_fl) : v_fr;
+    float v_rl = s_enc_rl ? s_enc_rl->get_speed_mps(s_enc_rl) : v_fr;
+    float v_rr = s_enc_rr ? s_enc_rr->get_speed_mps(s_enc_rr) : v_fr;
+    // 计算四轮控制输出
+    int out_fl = (int)lroundf(pid_compute(&s_pid_fl, PID_TARGET_SPEED_MPS, v_fl, dt_pid));
+    int out_fr = (int)lroundf(pid_compute(&s_pid_fr, PID_TARGET_SPEED_MPS, v_fr, dt_pid));
+    int out_rl = (int)lroundf(pid_compute(&s_pid_rl, PID_TARGET_SPEED_MPS, v_rl, dt_pid));
+    int out_rr = (int)lroundf(pid_compute(&s_pid_rr, PID_TARGET_SPEED_MPS, v_rr, dt_pid));
+    // 输出限幅到 [-1000, 1000]，分行书写避免 -Werror=misleading-indentation
+    if (out_fl > 1000) out_fl = 1000;
+    if (out_fl < -1000) out_fl = -1000;
+    if (out_fr > 1000) out_fr = 1000;
+    if (out_fr < -1000) out_fr = -1000;
+    if (out_rl > 1000) out_rl = 1000;
+    if (out_rl < -1000) out_rl = -1000;
+    if (out_rr > 1000) out_rr = 1000;
+    if (out_rr < -1000) out_rr = -1000;
+    // 分别驱动四个轮子（统一驱动对象的极性映射由此体现）
+    motor_set_permille(&MOTOR_FL, MOTOR_POL_FL * out_fl);
+    motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * out_fr);
+    motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * out_rl);
+    motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * out_rr);
+    ESP_LOGI(TAG, "PID 4W: target=%.3f m/s | v_FL=%.3f v_FR=%.3f v_RL=%.3f v_RR=%.3f | out_FL/FR/RL/RR=%d/%d/%d/%d‰",
+             PID_TARGET_SPEED_MPS, v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
+#endif
+    // 新增：自动方向校验（一次性）
+    if (s_dir_test_enable && s_enc_fr) {
+      switch (s_dir_test_state) {
+        case 0: {
+          // 启动前进 2s
+          s_dir_test_start_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+          robot_drive_forward(&s_rb, 300);
+          s_dir_test_ts = xTaskGetTickCount();
+          ESP_LOGI(TAG, "方向校验: 前进测试开始 (300/1000)");
+          s_dir_test_state = 1;
+          break;
+        }
+        case 1: {
+          TickType_t now = xTaskGetTickCount();
+          if ((now - s_dir_test_ts) >= pdMS_TO_TICKS(2000)) {
+            int end_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+            int delta = end_cnt - s_dir_test_start_cnt;
+            float dt = ((float)(now - s_dir_test_ts)) * (portTICK_PERIOD_MS / 1000.0f);
+            float pps = (dt > 0.0f) ? (delta / dt) : 0.0f;
+            float avg_mps = 0.0f;
+            if (s_counts_per_rev_cfg > 0 && dt > 0.0f) {
+              float circumference_m = (float)M_PI * 0.065f; // 直径 65mm -> 0.065m
+              avg_mps = ((float)delta / (float)s_counts_per_rev_cfg) * circumference_m / dt;
+            }
+            ESP_LOGI(TAG, "方向校验: 前进2s 结果 delta=%d speed=%.1fpps avg_v=%.3fm/s (正负号即方向)", delta, pps, avg_mps);
+            robot_stop(&s_rb);
+            s_dir_test_ts = xTaskGetTickCount();
+            s_dir_test_state = 2;
+          }
+          break;
+        }
+        case 2: {
+          // 启动后退 2s
+          s_dir_test_start_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+          robot_drive_backward(&s_rb, 300);
+          s_dir_test_ts = xTaskGetTickCount();
+          ESP_LOGI(TAG, "方向校验: 后退测试开始 (300/1000)");
+          s_dir_test_state = 3;
+          break;
+        }
+        case 3: {
+          TickType_t now = xTaskGetTickCount();
+          if ((now - s_dir_test_ts) >= pdMS_TO_TICKS(2000)) {
+            int end_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+            int delta = end_cnt - s_dir_test_start_cnt;
+            float dt = ((float)(now - s_dir_test_ts)) * (portTICK_PERIOD_MS / 1000.0f);
+            float pps = (dt > 0.0f) ? (delta / dt) : 0.0f;
+            float avg_mps = 0.0f;
+            if (s_counts_per_rev_cfg > 0 && dt > 0.0f) {
+              float circumference_m = (float)M_PI * 0.065f; // 直径 65mm -> 0.065m
+              avg_mps = ((float)delta / (float)s_counts_per_rev_cfg) * circumference_m / dt;
+            }
+            ESP_LOGI(TAG, "方向校验: 后退2s 结果 delta=%d speed=%.1fpps avg_v=%.3fm/s (正负号即方向)", delta, pps, avg_mps);
+            robot_stop(&s_rb);
+            s_dir_test_state = 4;
+            s_dir_test_enable = false;  // 完成一次校验
+            ESP_LOGI(TAG, "方向校验完成");
+          }
+          break;
+        }
+        default:
+          break;
+      }
     }
 
 

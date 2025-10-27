@@ -2,3 +2,5 @@
 .cache
 .vscode
 components/V4Refer/*
+build/*
+
