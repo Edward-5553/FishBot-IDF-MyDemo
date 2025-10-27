@@ -1,8 +1,10 @@
 set(src_dirs
-            PWM)
+            PWM
+            KINEMATICS)
 
 set(include_dirs
-            PWM)
+            PWM
+            KINEMATICS)
 
 set(requires
             driver
