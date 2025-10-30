@@ -12,6 +12,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <stdbool.h>
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 
 ////// Component Part >>>>>>
 #include "led.h"
@@ -25,7 +28,30 @@
 #include "driver/pcnt.h"
 ////// Component Part <<<<<<
 
+////// MicroROS Part >>>>>>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/publisher.h>
+#include <rcl/error_handling.h>
+#include <rclc/executor.h>
+#include <geometry_msgs/msg/twist.h>
+#include <rmw_microros/rmw_microros.h>
+#include "lwip/ip4_addr.h"
+////// MicroROS Part <<<<<<
+
+#include <global_config.h>
+
 static const char *TAG = "MAIN";
+
+// Static Variables
+static rcl_allocator_t allocator;
+static rclc_support_t support;
+static rcl_node_t node;
+static rclc_executor_t executor;
+static rcl_publisher_t publisher;
+static geometry_msgs__msg__Twist velocity_msg;
+
+
 
 // 新增：参考 V4 驱动方式，默认使用 COAST（快衰减）以先确保能转动
 #define MOTOR_DEMO_DRIVE_MODE_BRAKE_DEFAULT  0
@@ -124,6 +150,149 @@ static bool s_pid_all_inited = false;                             // 是否已�
 static TickType_t s_pid_last_tick = 0;                            // 统一 PID 采样周期计时
 #endif
 
+// WiFi连接状态和重试计数
+static int s_wifi_retry_num = 0;
+static const int WIFI_MAXIMUM_RETRY = 5;
+static bool s_wifi_connected = false;
+
+// WIFI Related Function
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    if (event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "WiFi 已启动，尝试连接到 SSID: %s", WIFI_SSID);
+        esp_wifi_connect();
+    } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+        ESP_LOGI(TAG, "已连接到 SSID: %s", WIFI_SSID);
+        s_wifi_retry_num = 0;  // 重置重试计数
+    } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *disconnected = (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGW(TAG, "WiFi断开连接，原因: %d", disconnected->reason);
+        
+        s_wifi_connected = false;
+        if (s_wifi_retry_num < WIFI_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_wifi_retry_num++;
+            ESP_LOGI(TAG, "重试连接到AP，第 %d/%d 次", s_wifi_retry_num, WIFI_MAXIMUM_RETRY);
+        } else {
+            ESP_LOGE(TAG, "连接到AP失败，已达到最大重试次数");
+        }
+    } else if (event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "已获取 IP 地址: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_wifi_connected = true;
+        s_wifi_retry_num = 0;
+    }
+}
+
+static esp_err_t wifi_init_sta(void)
+{
+    esp_err_t ret;
+    ESP_LOGI(TAG, "初始化 WiFi 作为 Station...");
+    ESP_LOGI(TAG, "目标 SSID: %s", WIFI_SSID);
+    
+    ret = esp_netif_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_init 失败: 0x%x", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "网络接口初始化成功");
+
+    // 本段代码属于 Wi-Fi Station 初始化流程的一部分：
+    // 1. 先调用 esp_netif_init() 完成 TCP/IP 协议栈与网络接口的初始化；
+    // 2. 随后创建默认事件循环 esp_event_loop_create_default()，为后续 Wi-Fi 事件（连接、断开、获取 IP 等）提供统一分发机制；
+    // 3. 最后通过 esp_wifi_register_event_handler() 把自定义的 wifi_event_handler 注册到系统，
+    //    确保所有 Wi-Fi 相关事件（如 STA_START、STA_CONNECTED、STA_DISCONNECTED、GOT_IP）都能被捕获并自动处理重连/打印信息。
+    ret = esp_event_loop_create_default();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_event_loop_create_default 失败: 0x%x", ret);
+        return ret;
+    } 
+    ESP_LOGI(TAG, "事件循环创建成功");
+
+    // 创建默认WiFi STA网络接口
+    esp_netif_create_default_wifi_sta();
+    ESP_LOGI(TAG, "WiFi STA网络接口创建成功");
+
+    // 初始化WiFi
+    wifi_init_config_t s_wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
+    ret = esp_wifi_init(&s_wifi_init_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_init 失败: 0x%x", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "WiFi驱动初始化成功");
+
+    // 注册 WiFi 事件回调函数，所有 WiFi 事件都会触发 wifi_event_handler
+    ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_event_handler_register WIFI_EVENT 失败: 0x%x", ret);
+        return ret;
+    }
+    
+    ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_event_handler_register IP_EVENT 失败: 0x%x", ret);
+        return ret;
+    }
+
+    ret = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_mode 失败: 0x%x", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "WiFi模式设置为STA成功");
+
+    wifi_config_t s_wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK,  // 支持更多认证模式
+            .pmf_cfg = {
+                .capable = true,
+                .required = false,  // 不强制要求PMF，提高兼容性
+            },
+            .scan_method = WIFI_FAST_SCAN,
+            .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
+            .failure_retry_cnt = 3,  // 连接失败重试次数
+        },
+    };
+
+    ESP_LOGI(TAG, "配置WiFi参数 - SSID: %s, 认证模式: WPA/WPA2-PSK", WIFI_SSID);
+    
+    ret = esp_wifi_set_config(WIFI_IF_STA, &s_wifi_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_config 失败: 0x%x", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "WiFi配置设置成功");
+
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_start 失败: 0x%x", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "WiFi启动成功，等待连接事件...");
+
+    ESP_LOGI(TAG, "WiFi 初始化完成，SSID: %s", WIFI_SSID);
+    return ret;
+}
+
+// 检查WiFi连接状态
+static bool is_wifi_connected(void)
+{
+    return s_wifi_connected;
+}
+
+// 重新启动WiFi连接
+static void restart_wifi_connection(void)
+{
+    ESP_LOGI(TAG, "重新启动WiFi连接...");
+    s_wifi_retry_num = 0;
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(1000));  // 等待1秒
+    esp_wifi_connect();
+}
+
 /* 静止校准陀螺零速偏移（请在调用前保持设备静止）*/
 static void calibrate_gyro_bias_static(int samples, int delay_ms)
 {
@@ -174,6 +343,12 @@ void app_main(void) {
     ESP_LOGI(TAG, "NVS 重新初始化完成");
   } else {
     ESP_LOGE(TAG, "NVS 初始化失败: 0x%x", ret);
+  }
+
+  ESP_LOGI(TAG, "WiFi 初始化...");
+  ret = wifi_init_sta();
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "WiFi 初始化失败: 0x%x", ret);
   }
 
   ESP_LOGI(TAG, "LED 初始化...");
@@ -524,7 +699,21 @@ void app_main(void) {
       }
     }
 
-
+    // WiFi连接状态监控和重连机制
+    static TickType_t last_wifi_check = 0;
+    TickType_t current_tick = xTaskGetTickCount();
+    
+    // 每10秒检查一次WiFi连接状态
+    if ((current_tick - last_wifi_check) >= pdMS_TO_TICKS(10000)) {
+        last_wifi_check = current_tick;
+        
+        if (!is_wifi_connected()) {
+            ESP_LOGW(TAG, "WiFi未连接，尝试重新连接...");
+            restart_wifi_connection();
+        } else {
+            ESP_LOGI(TAG, "WiFi连接正常");
+        }
+    }
 
     vTaskDelay(pdMS_TO_TICKS(500));
   }
