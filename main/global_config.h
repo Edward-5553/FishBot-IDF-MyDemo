@@ -8,7 +8,7 @@
 // MicroROS Configuration 
 // Agent Configuration
 #define MICROROS_AGENT_IP "192.168.137.85"
-#define MICROROS_AGENT_PORT 8888
+#define MICROROS_AGENT_PORT "8888"
 
 // 新增：参考 V4 驱动方式，默认使用 COAST（快衰减）以先确保能转动
 #define MOTOR_DEMO_DRIVE_MODE_BRAKE_DEFAULT  0
@@ -18,11 +18,17 @@
 #define MOTOR2_SPEED_TEST_ENABLE              0
 // 用户测试宏：置1启用车轮速度 PID 闭环控制（目标速度 m/s）。
 // 为兼容历史，此宏仍沿用原名（开启后将为所有轮子创建 PID 控制，若某些轮子尚未配置编码器，则以右前轮的测量作为临时反馈）。
-#define MOTOR2_PID_TEST_ENABLE                0
+
+// 每个轮位的“逻辑正转”极性（+1：permille>0 为正转；-1：permille<0 为正转）（保留以支持后续方向控制）
+#define MOTOR_POL_FL (-1)
+#define MOTOR_POL_FR (+1)
+#define MOTOR_POL_RL (-1)
+#define MOTOR_POL_RR (+1)
 
 // PID Configuration
+#define MOTOR2_PID_TEST_ENABLE                0
 // PID 目标速度（m/s），请根据场景安全设置，初值偏保守
-#define PID_TARGET_SPEED_MPS                  0.20f
+#define PID_TARGET_SPEED_MPS                  0.5f
 // PID 初始增益（单位：输出permille/速度m/s），请按需要调参
 #define PID_KP                                600.0f
 #define PID_KI                                200.0f
@@ -64,5 +70,9 @@
   #define ENC_RR_GPIO_A     GPIO_NUM_11
   #define ENC_RR_GPIO_B     GPIO_NUM_10
 #endif
+
+// KINECT 配置
+#define TRACK_WIDTH_M 0.25          // 25 cm
+#define WHEEL_RADIUS_M 0.0325       // 32.5 mm
 
 #endif

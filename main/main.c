@@ -26,6 +26,7 @@
 #include "rotary_encoder.h"
 #include "pid_controller.h"  // 新增：速度 PID 控制器
 #include "driver/pcnt.h"
+#include "kinematics_diff4.h"
 ////// Component Part <<<<<<
 
 ////// MicroROS Part >>>>>>
@@ -51,6 +52,9 @@ static rclc_executor_t executor;
 static rcl_publisher_t publisher;
 static geometry_msgs__msg__Twist velocity_msg;
 
+static float robot_linear_x = 0.0f; // 机器人线速度（x 轴）  // 沿 x 轴
+static float robot_angular_z = 0.0f; // 机器人角速度（z 轴） // 绕 z 轴
+
 /* IMU 位姿滤波状态（Roll/Pitch/Yaw，单位：度） */
 static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
 /* FreeRTOS Tick 计时，用于积分 */
@@ -65,18 +69,13 @@ static motor_t s_motor1, s_motor2, s_motor3, s_motor4;            /* 四路电�
 #define MOTOR_FR s_motor2 // 右前 Front-Right
 #define MOTOR_RL s_motor3 // 左后 Rear-Left
 #define MOTOR_RR s_motor4 // 右后 Rear-Right
-// 每个轮位的“逻辑正转”极性（+1：permille>0 为正转；-1：permille<0 为正转）（保留以支持后续方向控制）
-#define MOTOR_POL_FL (-1)
-#define MOTOR_POL_FR (+1)
-#define MOTOR_POL_RL (-1)
-#define MOTOR_POL_RR (+1)
+
 // 新增：统一车辆驱动对象 + 编码器对象（示例：右前轮）
 static robot_drive_t s_rb;                    // 统一驱动对象
 static rotary_encoder_t *s_enc_fr = NULL;     // 右前轮编码器（宏定义：ENC_FR_GPIO_A/ENC_FR_GPIO_B/ENC_FR_PCNT_UNIT）
 static rotary_encoder_t *s_enc_fl = NULL;     // 左前轮编码器（需填写 A/B 引脚）
 static rotary_encoder_t *s_enc_rl = NULL;     // 左后轮编码器（需填写 A/B 引脚）
 static rotary_encoder_t *s_enc_rr = NULL;     // 右后轮编码器（需填写 A/B 引脚）
-static int s_enc_last_cnt = 0;                // 上次计数
 static TickType_t s_enc_last_tick = 0;        // 上次计数时间戳
 static int s_counts_per_rev_cfg = 0;          // 右前轮每圈脉冲数（测得）
 // 新增：方向校验状态机
@@ -98,6 +97,11 @@ static TickType_t s_pid_last_tick = 0;                            // 统一 PID 
 static int s_wifi_retry_num = 0;
 static const int WIFI_MAXIMUM_RETRY = 5;
 static bool s_wifi_connected = false;
+
+diff4_kinematics_cfg_t diff4_kinematics_cfg = {
+    .track_width_m = TRACK_WIDTH_M,
+    .wheel_radius_m = WHEEL_RADIUS_M,
+};
 
 // WIFI Related Function
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data)
@@ -237,6 +241,90 @@ static void restart_wifi_connection(void)
     esp_wifi_connect();
 }
 
+// MicroROS Related Function
+static bool microros_init(void)
+{
+    ESP_LOGI(TAG, "初始化 micro-ROS...");
+    
+    // 等待WiFi连接完成
+    int retry_count = 0;
+    while (!is_wifi_connected() && retry_count < 30) {
+        ESP_LOGI(TAG, "等待WiFi连接... (%d/30)", retry_count + 1);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        retry_count++;
+    }
+    
+    if (!is_wifi_connected()) {
+        ESP_LOGE(TAG, "WiFi未连接，无法初始化micro-ROS");
+        return false;
+    }
+    
+    // 初始化分配器
+    allocator = rcl_get_default_allocator();
+    
+    // 初始化选项
+    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+    if (rcl_init_options_init(&init_options, allocator) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rcl_init_options_init 失败");
+        return false;
+    }
+    
+    // 设置UDP地址
+    rmw_init_options_t* rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
+    if (rmw_uros_options_set_udp_address(MICROROS_AGENT_IP, MICROROS_AGENT_PORT, rmw_options) != RMW_RET_OK) {
+        ESP_LOGE(TAG, "rmw_uros_options_set_udp_address 失败");
+        return false;
+    }
+    
+    // 初始化支持结构
+    if (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_support_init_with_options 失败");
+        return false;
+    }
+    
+    // 创建节点
+    if (rclc_node_init_default(&node, "fishbot_velocity_publisher", "", &support) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_node_init_default 失败");
+        return false;
+    }
+    
+    // 创建发布者
+    if (rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/cmd_vel") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_publisher_init_default 失败");
+        return false;
+    }
+    
+    // 初始化执行器
+    if (rclc_executor_init(&executor, &support.context, 1, &allocator) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_executor_init 失败");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "micro-ROS 初始化成功");
+    return true;
+}
+
+// Publish velocity message to micro-ROS
+static void publish_velocity(float vx, float omega)
+{
+    //velocity_msg
+    velocity_msg.linear.x = robot_linear_x;
+    velocity_msg.linear.y = 0.0;
+    velocity_msg.linear.z = 0.0;
+    velocity_msg.angular.x = 0.0;
+    velocity_msg.angular.y = 0.0;
+    velocity_msg.angular.z = omega;
+
+    rcl_ret_t ret = rcl_publish(&publisher, &velocity_msg, NULL);
+    if (ret != RCL_RET_OK) {
+        ESP_LOGW(TAG, "micro-ROS 发布速度消息失败: 0x%x", ret);
+    }
+}
+
 /* 静止校准陀螺零速偏移（请在调用前保持设备静止）*/
 static void calibrate_gyro_bias_static(int samples, int delay_ms)
 {
@@ -293,6 +381,11 @@ void app_main(void) {
   ret = wifi_init_sta();
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "WiFi 初始化失败: 0x%x", ret);
+  } else {
+    ESP_LOGI(TAG, "WiFi 连接成功，初始化 micro-ROS...");
+    if (!microros_init()) {
+      ESP_LOGE(TAG, "micro-ROS 初始化失败");
+    }
   }
 
   ESP_LOGI(TAG, "LED 初始化...");
@@ -483,26 +576,12 @@ void app_main(void) {
       ESP_LOGW(TAG, "读取 LSM6DS3 原始数据失败: %s", esp_err_to_name(ret));
     }
 
-    // 新增：编码器速度/方向打印（右前轮）
-    if (s_enc_fr) {
-      TickType_t now_enc = xTaskGetTickCount();
-      float dt_enc = ((float)(now_enc - s_enc_last_tick)) * (portTICK_PERIOD_MS / 1000.0f);
-      s_enc_last_tick = now_enc;
-      int cnt = s_enc_fr->get_counter_value(s_enc_fr);
-      int delta = cnt - s_enc_last_cnt;
-      s_enc_last_cnt = cnt;
-      float pps = (dt_enc > 0.0f) ? (delta / dt_enc) : 0.0f;  // pulses per second
-      float v_mps = s_enc_fr->get_speed_mps(s_enc_fr);        // 轮速（m/s），带符号
-      const char *dir = (delta > 0) ? "DIR+" : (delta < 0) ? "DIR-" : "STOP";
-      ESP_LOGI(TAG, "FR Enc: cnt=%d delta=%d speed=%.1fpps v=%.3fm/s %s", cnt, delta, pps, v_mps, dir);
-    }
-
-    // 额外打印：各轮速度（若已配置编码器）
+    // 根据电机编码器获取各电机转速
     {
-      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
-      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) : 0.0f;
-      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
-      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
+      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) * MOTOR_POL_FL: 0.0f;
+      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) * MOTOR_POL_FR: 0.0f;
+      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) * MOTOR_POL_RL: 0.0f;
+      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) * MOTOR_POL_RR: 0.0f;
       // 只有在至少一个编码器存在时打印该汇总行
       if (s_enc_fl || s_enc_fr || s_enc_rl || s_enc_rr) {
         ESP_LOGI(TAG, "Wheels v[m/s]: FL=%s%.3f FR=%s%.3f RL=%s%.3f RR=%s%.3f",
@@ -510,9 +589,13 @@ void app_main(void) {
                  (s_enc_fr ? "" : "N/A:"), v_fr,
                  (s_enc_rl ? "" : "N/A:"), v_rl,
                  (s_enc_rr ? "" : "N/A:"), v_rr);
-        ESP_LOGI(TAG, "Encoders present: FL=%d FR=%d RL=%d RR=%d",
-                 s_enc_fl ? 1 : 0, s_enc_fr ? 1 : 0, s_enc_rl ? 1 : 0, s_enc_rr ? 1 : 0);
       }
+
+      diff4_forward_mps(&diff4_kinematics_cfg, v_fl, v_fr, v_rl, v_rr, &robot_linear_x, &robot_angular_z);
+      //diff4_forward_rads(&diff4_kinematics_cfg, robot_linear_x, robot_angular_z, &v_fl, &v_fr, &v_rl, &v_rr);
+      publish_velocity(robot_linear_x, robot_angular_z);
+      rclc_executor_spin_some(&executor, pdMS_TO_TICKS(10));
+      ESP_LOGI(TAG, "Robot velocity: linear_x=%.3f m/s", robot_linear_x);
     }
 
 #if MOTOR2_SPEED_TEST_ENABLE
@@ -553,9 +636,9 @@ void app_main(void) {
     s_pid_last_tick = now_pid;
     // 测量各轮速度（若未配置编码器，则临时采用右前轮速度作为反馈以保持一致）
     float v_fr = s_enc_fr ? s_enc_fr->get_speed_mps(s_enc_fr) : 0.0f;
-    float v_fl = s_enc_fl ? s_enc_fl->get_speed_mps(s_enc_fl) : v_fr;
-    float v_rl = s_enc_rl ? s_enc_rl->get_speed_mps(s_enc_rl) : v_fr;
-    float v_rr = s_enc_rr ? s_enc_rr->get_speed_mps(s_enc_rr) : v_fr;
+    float v_fl = s_enc_fl ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
+    float v_rl = s_enc_rl ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
+    float v_rr = s_enc_rr ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
     // 计算四轮控制输出
     int out_fl = (int)lroundf(pid_compute(&s_pid_fl, PID_TARGET_SPEED_MPS, v_fl, dt_pid));
     int out_fr = (int)lroundf(pid_compute(&s_pid_fr, PID_TARGET_SPEED_MPS, v_fr, dt_pid));
