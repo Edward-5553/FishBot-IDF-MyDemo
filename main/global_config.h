@@ -45,8 +45,9 @@
 #define ENCODER_FR_ENABLE 1
 #if ENCODER_FR_ENABLE
   #define ENC_FR_PCNT_UNIT  PCNT_UNIT_0
-  #define ENC_FR_GPIO_A     GPIO_NUM_17
-  #define ENC_FR_GPIO_B     GPIO_NUM_18
+  #define ENC_FR_GPIO_A     GPIO_NUM_18
+  #define ENC_FR_GPIO_B     GPIO_NUM_17
+  #define FR_PCNT_TEN_CIRCLE_COUNT 19834
 #endif
 
 // 左前轮（Motor1）编码器：A=GPIO7, B=GPIO6，建议使用 PCNT_UNIT_1
@@ -55,6 +56,7 @@
   #define ENC_FL_PCNT_UNIT  PCNT_UNIT_1
   #define ENC_FL_GPIO_A     GPIO_NUM_7
   #define ENC_FL_GPIO_B     GPIO_NUM_6
+  #define FL_PCNT_TEN_CIRCLE_COUNT 19618
 #endif
 
 // 左后轮（Motor3）编码器：A=GPIO19, B=GPIO20，建议使用 PCNT_UNIT_2
@@ -63,6 +65,7 @@
   #define ENC_RL_PCNT_UNIT  PCNT_UNIT_2
   #define ENC_RL_GPIO_A     GPIO_NUM_19
   #define ENC_RL_GPIO_B     GPIO_NUM_20
+  #define RL_PCNT_TEN_CIRCLE_COUNT 20005
 #endif
 
 // 右后轮（Motor4）编码器：A=GPIO11, B=GPIO10，建议使用 PCNT_UNIT_3
@@ -71,6 +74,7 @@
   #define ENC_RR_PCNT_UNIT  PCNT_UNIT_3
   #define ENC_RR_GPIO_A     GPIO_NUM_11
   #define ENC_RR_GPIO_B     GPIO_NUM_10
+  #define RR_PCNT_TEN_CIRCLE_COUNT 19689
 #endif
 
 // KINECT 配置

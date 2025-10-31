@@ -438,32 +438,10 @@ void app_main(void) {
   robot_init_drive(&s_rb, &MOTOR_FL, &MOTOR_FR, &MOTOR_RL, &MOTOR_RR, MOTOR_POL_FL, MOTOR_POL_FR, MOTOR_POL_RL, MOTOR_POL_RR);
   robot_stop(&s_rb);
 
-  // 创建右前轮编码器（使用宏定义，便于后期修改）
-#if ENCODER_FR_ENABLE
-  s_enc_fr = create_rotary_encoder(ENC_FR_PCNT_UNIT, ENC_FR_GPIO_A, ENC_FR_GPIO_B);
-#else
-  s_enc_fr = NULL;
-#endif
-  if (s_enc_fr) {
-    ESP_LOGI(TAG, "右前轮编码器创建成功: PCNT_UNIT_%d, A=GPIO%u, B=GPIO%u", (int)ENC_FR_PCNT_UNIT, (unsigned)ENC_FR_GPIO_A, (unsigned)ENC_FR_GPIO_B);
-    // 根据用户测量：10圈共 19741 脉冲 -> 每圈 ≈ 1974.1，四舍五入为 1974
-    int counts_per_rev = (int)lroundf(19741.0f / 10.0f);
-    s_counts_per_rev_cfg = counts_per_rev;
-    esp_err_t cwret = s_enc_fr->config_wheel(s_enc_fr, 65.0f, counts_per_rev);
-    if (cwret == ESP_OK) {
-      ESP_LOGI(TAG, "轮速换算配置: 直径=65mm, counts_per_rev=%d (来源: 10圈测得19741脉冲)", counts_per_rev);
-    } else {
-      ESP_LOGE(TAG, "轮速换算配置失败: %s", esp_err_to_name(cwret));
-    }
-  } else {
-    ESP_LOGE(TAG, "右前轮编码器创建失败，后续速度/方向打印不可用");
-  }
-
-  // 可选：创建左前/左后/右后编码器（需在顶部填写 GPIO 与 PCNT 单元并将 ENABLE 置1）
 #if ENCODER_FL_ENABLE
   s_enc_fl = create_rotary_encoder(ENC_FL_PCNT_UNIT, ENC_FL_GPIO_A, ENC_FL_GPIO_B);
   if (s_enc_fl) {
-    esp_err_t cwret = s_enc_fl->config_wheel(s_enc_fl, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(19741.0f / 10.0f));
+    esp_err_t cwret = s_enc_fl->config_wheel(s_enc_fl, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(FL_PCNT_TEN_CIRCLE_COUNT / 10.0f));
     ESP_LOGI(TAG, "左前轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_FL_PCNT_UNIT, (int)ENC_FL_GPIO_A, (int)ENC_FL_GPIO_B);
     if (cwret != ESP_OK) {
       ESP_LOGW(TAG, "左前轮速度换算配置失败: %s", esp_err_to_name(cwret));
@@ -473,10 +451,23 @@ void app_main(void) {
   }
 #endif
 
+#if ENCODER_FR_ENABLE
+  s_enc_fr = create_rotary_encoder(ENC_FR_PCNT_UNIT, ENC_FR_GPIO_A, ENC_FR_GPIO_B);
+  if (s_enc_fr) {
+    esp_err_t cwret = s_enc_fr->config_wheel(s_enc_fr, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(FR_PCNT_TEN_CIRCLE_COUNT / 10.0f));
+    ESP_LOGI(TAG, "右前轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_FR_PCNT_UNIT, (int)ENC_FR_GPIO_A, (int)ENC_FR_GPIO_B);
+    if (cwret != ESP_OK) {
+      ESP_LOGW(TAG, "右前轮速度换算配置失败: %s", esp_err_to_name(cwret));
+    }
+  } else {
+    ESP_LOGE(TAG, "右前轮编码器创建失败（请检查 PCNT 单元与 GPIO 配置）");
+  }
+#endif
+
 #if ENCODER_RL_ENABLE
   s_enc_rl = create_rotary_encoder(ENC_RL_PCNT_UNIT, ENC_RL_GPIO_A, ENC_RL_GPIO_B);
   if (s_enc_rl) {
-    esp_err_t cwret = s_enc_rl->config_wheel(s_enc_rl, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(19741.0f / 10.0f));
+    esp_err_t cwret = s_enc_rl->config_wheel(s_enc_rl, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(RL_PCNT_TEN_CIRCLE_COUNT / 10.0f));
     ESP_LOGI(TAG, "左后轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_RL_PCNT_UNIT, (int)ENC_RL_GPIO_A, (int)ENC_RL_GPIO_B);
     if (cwret != ESP_OK) {
       ESP_LOGW(TAG, "左后轮速度换算配置失败: %s", esp_err_to_name(cwret));
@@ -489,7 +480,7 @@ void app_main(void) {
 #if ENCODER_RR_ENABLE
   s_enc_rr = create_rotary_encoder(ENC_RR_PCNT_UNIT, ENC_RR_GPIO_A, ENC_RR_GPIO_B);
   if (s_enc_rr) {
-    esp_err_t cwret = s_enc_rr->config_wheel(s_enc_rr, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(19741.0f / 10.0f));
+    esp_err_t cwret = s_enc_rr->config_wheel(s_enc_rr, 65.0f, s_counts_per_rev_cfg > 0 ? s_counts_per_rev_cfg : (int)lroundf(RR_PCNT_TEN_CIRCLE_COUNT / 10.0f));
     ESP_LOGI(TAG, "右后轮编码器创建成功: unit=%d, A=%d, B=%d", (int)ENC_RR_PCNT_UNIT, (int)ENC_RR_GPIO_A, (int)ENC_RR_GPIO_B);
     if (cwret != ESP_OK) {
       ESP_LOGW(TAG, "右后轮速度换算配置失败: %s", esp_err_to_name(cwret));
