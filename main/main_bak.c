@@ -8,6 +8,9 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <stdbool.h>
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -19,8 +22,9 @@
 #include "mpu6050.h"
 #include "oled.h"
 #include "motor.h"
+// 新增：编码器（A/B 双相，PCNT 计数）
 #include "rotary_encoder.h"
-#include "pid_controller.h"
+#include "pid_controller.h"  // 新增：速度 PID 控制器
 #include "driver/pcnt.h"
 #include "kinematics_diff4.h"
 ////// Component Part <<<<<<
@@ -74,6 +78,20 @@ static rotary_encoder_t *s_enc_rl = NULL;     // 左后轮编码器（需填写 
 static rotary_encoder_t *s_enc_rr = NULL;     // 右后轮编码器（需填写 A/B 引脚）
 static TickType_t s_enc_last_tick = 0;        // 上次计数时间戳
 static int s_counts_per_rev_cfg = 0;          // 右前轮每圈脉冲数（测得）
+// 新增：方向校验状态机
+static int s_dir_test_state = 0;              // 0:待开始 1:前进中 2:前进结束 3:后退中 4:后退结束
+static TickType_t s_dir_test_ts = 0;          // 当前阶段起始 tick
+static int s_dir_test_start_cnt = 0;          // 阶段起始计数
+static bool s_dir_test_enable = ROBOT_DIR_TEST_ENABLE;
+#if MOTOR2_SPEED_TEST_ENABLE
+static bool s_motor2_test_started = false;    // MOTOR2 70%占空测试是否已启动
+#endif
+// 新增：右前轮速度 PID 控制器状态
+#if MOTOR2_PID_TEST_ENABLE
+static pid_controller_t s_pid_fl, s_pid_fr, s_pid_rl, s_pid_rr;  // 四轮 PID 控制器
+static bool s_pid_all_inited = false;                             // 是否已完成四轮 PID 初始化
+static TickType_t s_pid_last_tick = 0;                            // 统一 PID 采样周期计时
+#endif
 
 // WiFi连接状态和重试计数
 static int s_wifi_retry_num = 0;
@@ -294,7 +312,7 @@ static bool microros_init(void)
 static void publish_velocity(float vx, float omega)
 {
     //velocity_msg
-    velocity_msg.linear.x = vx;
+    velocity_msg.linear.x = robot_linear_x;
     velocity_msg.linear.y = 0.0;
     velocity_msg.linear.z = 0.0;
     velocity_msg.angular.x = 0.0;
@@ -344,7 +362,7 @@ static void calibrate_gyro_bias_static(int samples, int delay_ms)
 void app_main(void) {
   esp_err_t ret;
 
-  ESP_LOGI(TAG, "应用启动, 开发IDF版本: v5.5.1, 当前IDF版本: %s", esp_get_idf_version());
+  ESP_LOGI(TAG, "应用启动，IDF版本: %s", esp_get_idf_version());
 
   ret = nvs_flash_init(); /* 初始化NVS */
   if (ret == ESP_OK) {
@@ -394,7 +412,6 @@ void app_main(void) {
   }
 
   // OLED 初始化与演示
-  /*
   ESP_LOGI(TAG, "OLED 初始化...");
   if (oled_init()) {
     s_oled_ready = true;
@@ -403,7 +420,6 @@ void app_main(void) {
   } else {
     ESP_LOGE(TAG, "OLED 初始化失败");
   }
-  */
 
   // MOTOR 初始化（LEDC 低速模式，5kHz，13-bit），GPIO映射来自用户提供
   ESP_LOGI(TAG, "MOTOR 初始化...");
@@ -582,6 +598,21 @@ void app_main(void) {
       ESP_LOGI(TAG, "Robot velocity: linear_x=%.3f m/s", robot_linear_x);
     }
 
+#if MOTOR2_SPEED_TEST_ENABLE
+    // 一键测试：MOTOR2(右前轮)占空比70%，并打印轮速
+    if (!s_motor2_test_started) {
+      motor_set_permille(&s_motor2, 700);
+      s_motor2_test_started = true;
+      ESP_LOGI(TAG, "MOTOR2 70%%占空测试启动: permille=700 (右前轮)");
+    }
+    if (s_enc_fr) {
+      float v_test = s_enc_fr->get_speed_mps(s_enc_fr);
+      ESP_LOGI(TAG, "MOTOR2 TEST: wheel speed v=%.3f m/s", v_test);
+    } else {
+      ESP_LOGW(TAG, "MOTOR2 TEST: 未检测到右前轮编码器，无法打印轮速");
+    }
+#endif
+
 #if MOTOR2_PID_TEST_ENABLE
     // 四轮速度 PID 闭环控制（目标速度 PID_TARGET_SPEED_MPS）
     if (!s_pid_all_inited) {
@@ -630,13 +661,70 @@ void app_main(void) {
     ESP_LOGI(TAG, "PID 4W: target=%.3f m/s | v_FL=%.3f v_FR=%.3f v_RL=%.3f v_RR=%.3f | out_FL/FR/RL/RR=%d/%d/%d/%d‰",
              PID_TARGET_SPEED_MPS, v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
 #endif
-
-#if 0
-    motor_set_permille(&MOTOR_FL, MOTOR_POL_FL * 500);
-    motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * 500);
-    motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * 500);
-    motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * 500);
-#endif 
+    // 新增：自动方向校验（一次性）
+    if (s_dir_test_enable && s_enc_fr) {
+      switch (s_dir_test_state) {
+        case 0: {
+          // 启动前进 2s
+          s_dir_test_start_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+          robot_drive_forward(&s_rb, 300);
+          s_dir_test_ts = xTaskGetTickCount();
+          ESP_LOGI(TAG, "方向校验: 前进测试开始 (300/1000)");
+          s_dir_test_state = 1;
+          break;
+        }
+        case 1: {
+          TickType_t now = xTaskGetTickCount();
+          if ((now - s_dir_test_ts) >= pdMS_TO_TICKS(2000)) {
+            int end_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+            int delta = end_cnt - s_dir_test_start_cnt;
+            float dt = ((float)(now - s_dir_test_ts)) * (portTICK_PERIOD_MS / 1000.0f);
+            float pps = (dt > 0.0f) ? (delta / dt) : 0.0f;
+            float avg_mps = 0.0f;
+            if (s_counts_per_rev_cfg > 0 && dt > 0.0f) {
+              float circumference_m = (float)M_PI * 0.065f; // 直径 65mm -> 0.065m
+              avg_mps = ((float)delta / (float)s_counts_per_rev_cfg) * circumference_m / dt;
+            }
+            ESP_LOGI(TAG, "方向校验: 前进2s 结果 delta=%d speed=%.1fpps avg_v=%.3fm/s (正负号即方向)", delta, pps, avg_mps);
+            robot_stop(&s_rb);
+            s_dir_test_ts = xTaskGetTickCount();
+            s_dir_test_state = 2;
+          }
+          break;
+        }
+        case 2: {
+          // 启动后退 2s
+          s_dir_test_start_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+          robot_drive_backward(&s_rb, 300);
+          s_dir_test_ts = xTaskGetTickCount();
+          ESP_LOGI(TAG, "方向校验: 后退测试开始 (300/1000)");
+          s_dir_test_state = 3;
+          break;
+        }
+        case 3: {
+          TickType_t now = xTaskGetTickCount();
+          if ((now - s_dir_test_ts) >= pdMS_TO_TICKS(2000)) {
+            int end_cnt = s_enc_fr->get_counter_value(s_enc_fr);
+            int delta = end_cnt - s_dir_test_start_cnt;
+            float dt = ((float)(now - s_dir_test_ts)) * (portTICK_PERIOD_MS / 1000.0f);
+            float pps = (dt > 0.0f) ? (delta / dt) : 0.0f;
+            float avg_mps = 0.0f;
+            if (s_counts_per_rev_cfg > 0 && dt > 0.0f) {
+              float circumference_m = (float)M_PI * 0.065f; // 直径 65mm -> 0.065m
+              avg_mps = ((float)delta / (float)s_counts_per_rev_cfg) * circumference_m / dt;
+            }
+            ESP_LOGI(TAG, "方向校验: 后退2s 结果 delta=%d speed=%.1fpps avg_v=%.3fm/s (正负号即方向)", delta, pps, avg_mps);
+            robot_stop(&s_rb);
+            s_dir_test_state = 4;
+            s_dir_test_enable = false;  // 完成一次校验
+            ESP_LOGI(TAG, "方向校验完成");
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
 
     // WiFi连接状态监控和重连机制
     static TickType_t last_wifi_check = 0;

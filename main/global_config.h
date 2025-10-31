@@ -10,14 +10,15 @@
 #define MICROROS_AGENT_IP "192.168.137.85"
 #define MICROROS_AGENT_PORT "8888"
 
+// 新增：定义圆周率（若未定义）
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // 新增：参考 V4 驱动方式，默认使用 COAST（快衰减）以先确保能转动
 #define MOTOR_DEMO_DRIVE_MODE_BRAKE_DEFAULT  0
-// 新增：是否自动执行一次前进/后退方向校验（运行 2s 前进 + 2s 后退）
-#define ROBOT_DIR_TEST_ENABLE                 0
 // 用户测试宏：置1启用MOTOR2占空70%并打印轮速，置0编译移除该测试代码
 #define MOTOR2_SPEED_TEST_ENABLE              0
-// 用户测试宏：置1启用车轮速度 PID 闭环控制（目标速度 m/s）。
-// 为兼容历史，此宏仍沿用原名（开启后将为所有轮子创建 PID 控制，若某些轮子尚未配置编码器，则以右前轮的测量作为临时反馈）。
 
 // 每个轮位的“逻辑正转”极性（+1：permille>0 为正转；-1：permille<0 为正转）（保留以支持后续方向控制）
 #define MOTOR_POL_FL (-1)
@@ -26,6 +27,7 @@
 #define MOTOR_POL_RR (+1)
 
 // PID Configuration
+// 用户测试宏：置1启用车轮速度 PID 闭环控制（目标速度 m/s）。
 #define MOTOR2_PID_TEST_ENABLE                0
 // PID 目标速度（m/s），请根据场景安全设置，初值偏保守
 #define PID_TARGET_SPEED_MPS                  0.5f
