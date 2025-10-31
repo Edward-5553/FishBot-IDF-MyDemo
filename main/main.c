@@ -46,7 +46,10 @@ static rclc_support_t support;
 static rcl_node_t node;
 static rclc_executor_t executor;
 static rcl_publisher_t publisher;
+static rcl_subscription_t cmd_vel_subscriber;
+
 static geometry_msgs__msg__Twist velocity_msg;
+static geometry_msgs__msg__Twist cmd_vel_twist;
 
 static float robot_linear_x = 0.0f; // 机器人线速度（x 轴）  // 沿 x 轴
 static float robot_angular_z = 0.0f; // 机器人角速度（z 轴） // 绕 z 轴
@@ -229,6 +232,35 @@ static void restart_wifi_connection(void)
     esp_wifi_connect();
 }
 
+// Subscribe the /cmd_vel topic
+static void cmd_vel_callback(const void * msgin)
+{
+    float linear_x = 0.0f;
+    float angular_z = 0.0f;
+    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *) msgin;
+    linear_x = msg->linear.x;
+    angular_z = msg->angular.z;
+    ESP_LOGI(TAG, "收到速度指令: vx=%.3f, omega=%.3f", linear_x, angular_z);
+    // 如需联动驱动层，可在此触发目标速度更新（当前保持只赋值，不改变驱动逻辑）
+}
+
+// Publish velocity message to micro-ROS
+static void publish_velocity(float vx, float omega)
+{
+    //velocity_msg
+    velocity_msg.linear.x = vx;
+    velocity_msg.linear.y = 0.0;
+    velocity_msg.linear.z = 0.0;
+    velocity_msg.angular.x = 0.0;
+    velocity_msg.angular.y = 0.0;
+    velocity_msg.angular.z = omega;
+
+    rcl_ret_t ret = rcl_publish(&publisher, &velocity_msg, NULL);
+    if (ret != RCL_RET_OK) {
+        ESP_LOGW(TAG, "micro-ROS 发布速度消息失败: 0x%x", ret);
+    }
+}
+
 // MicroROS Related Function
 static bool microros_init(void)
 {
@@ -276,41 +308,45 @@ static bool microros_init(void)
         return false;
     }
     
-    // 创建发布者
+    // 创建发布者（设备反馈话题）
     if (rclc_publisher_init_default(
         &publisher,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "/cmd_vel") != RCL_RET_OK) {
+        "/robot/velocity") != RCL_RET_OK) {
         ESP_LOGE(TAG, "rclc_publisher_init_default 失败");
         return false;
     }
     
+    // 创建订阅者（命令话题）
+    if (rclc_subscription_init_default(
+        &cmd_vel_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/cmd_vel") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_subscription_init_default 失败");
+        return false;
+    }
+    
     // 初始化执行器
-    if (rclc_executor_init(&executor, &support.context, 1, &allocator) != RCL_RET_OK) {
+    if (rclc_executor_init(&executor, &support.context, 2, &allocator) != RCL_RET_OK) {
         ESP_LOGE(TAG, "rclc_executor_init 失败");
+        return false;
+    }
+
+    // 执行器添加订阅
+    if (rclc_executor_add_subscription(
+        &executor,
+        &cmd_vel_subscriber,
+        &cmd_vel_twist,
+        &cmd_vel_callback,
+        ON_NEW_DATA) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_executor_add_subscription 失败");
         return false;
     }
     
     ESP_LOGI(TAG, "micro-ROS 初始化成功");
     return true;
-}
-
-// Publish velocity message to micro-ROS
-static void publish_velocity(float vx, float omega)
-{
-    //velocity_msg
-    velocity_msg.linear.x = vx;
-    velocity_msg.linear.y = 0.0;
-    velocity_msg.linear.z = 0.0;
-    velocity_msg.angular.x = 0.0;
-    velocity_msg.angular.y = 0.0;
-    velocity_msg.angular.z = omega;
-
-    rcl_ret_t ret = rcl_publish(&publisher, &velocity_msg, NULL);
-    if (ret != RCL_RET_OK) {
-        ESP_LOGW(TAG, "micro-ROS 发布速度消息失败: 0x%x", ret);
-    }
 }
 
 /* 静止校准陀螺零速偏移（请在调用前保持设备静止）*/
