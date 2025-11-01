@@ -582,19 +582,19 @@ void app_main(void) {
 #if MOTOR2_PID_TEST_ENABLE
     // 四轮速度 PID 闭环控制（目标速度 PID_TARGET_SPEED_MPS）
     if (!s_pid_all_inited) {
-      // 输出限幅：电机 permille [-1000, 1000]；积分限幅缩小一些避免长时间饱和
-      pid_init(&s_pid_fl, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
-      pid_init(&s_pid_fr, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
-      pid_init(&s_pid_rl, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
-      pid_init(&s_pid_rr, PID_KP, PID_KI, PID_KD, -1000.0f, +1000.0f, -800.0f, +800.0f);
-      // 为提升鲁棒性，导数项使用测量值并加一阶低通滤波
-      pid_set_d_on_measurement(&s_pid_fl, true); pid_set_d_filter_alpha(&s_pid_fl, 0.9f);
-      pid_set_d_on_measurement(&s_pid_fr, true); pid_set_d_filter_alpha(&s_pid_fr, 0.9f);
-      pid_set_d_on_measurement(&s_pid_rl, true); pid_set_d_filter_alpha(&s_pid_rl, 0.9f);
-      pid_set_d_on_measurement(&s_pid_rr, true); pid_set_d_filter_alpha(&s_pid_rr, 0.9f);
-      s_pid_last_tick = xTaskGetTickCount();
-      s_pid_all_inited = true;
-      ESP_LOGI(TAG, "四轮 PID 启动: target=%.3f m/s, Kp=%.1f Ki=%.1f Kd=%.1f", PID_TARGET_SPEED_MPS, PID_KP, PID_KI, PID_KD);
+        // 输出限幅：电机 permille [-1000, 1000]；积分限幅缩小一些避免长时间饱和
+        pid_init(&s_pid_fl, PID_KP, PID_KI, PID_KD, -3000.0f, +3000.0f, -800.0f, +800.0f);
+        pid_init(&s_pid_fr, PID_KP, PID_KI, PID_KD, -3000.0f, +3000.0f, -800.0f, +800.0f);
+        pid_init(&s_pid_rl, PID_KP, PID_KI, PID_KD, -3000.0f, +3000.0f, -800.0f, +800.0f);
+        pid_init(&s_pid_rr, PID_KP, PID_KI, PID_KD, -3000.0f, +3000.0f, -800.0f, +800.0f);
+        // 为提升鲁棒性，导数项使用测量值并加一阶低通滤波
+        pid_set_d_on_measurement(&s_pid_fl, true); pid_set_d_filter_alpha(&s_pid_fl, 0.9f);
+        pid_set_d_on_measurement(&s_pid_fr, true); pid_set_d_filter_alpha(&s_pid_fr, 0.9f);
+        pid_set_d_on_measurement(&s_pid_rl, true); pid_set_d_filter_alpha(&s_pid_rl, 0.9f);
+        pid_set_d_on_measurement(&s_pid_rr, true); pid_set_d_filter_alpha(&s_pid_rr, 0.9f);
+        s_pid_last_tick = xTaskGetTickCount();
+        s_pid_all_inited = true;
+        ESP_LOGI(TAG, "四轮 PID 启动: target=%.3f m/s, Kp=%.1f Ki=%.1f Kd=%.1f", PID_TARGET_SPEED_MPS, PID_KP, PID_KI, PID_KD);
     }
     // 计算 dt
     TickType_t now_pid = xTaskGetTickCount();
@@ -651,6 +651,6 @@ void app_main(void) {
         }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
