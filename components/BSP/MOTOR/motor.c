@@ -117,18 +117,13 @@ static inline int scale_permille_local(int p, int factor_permille)
 }
 
 void robot_init_drive(robot_drive_t *rb,
-                      motor_t *fl, motor_t *fr, motor_t *rl, motor_t *rr,
-                      int pol_fl, int pol_fr, int pol_rl, int pol_rr)
+                      motor_t *fl, motor_t *fr, motor_t *rl, motor_t *rr)
 {
     if (!rb) return;
     rb->fl = fl;
     rb->fr = fr;
     rb->rl = rl;
     rb->rr = rr;
-    rb->pol_fl = pol_fl;
-    rb->pol_fr = pol_fr;
-    rb->pol_rl = pol_rl;
-    rb->pol_rr = pol_rr;
     rb->turn_slow_factor_permille = 500; // 默认 50%
 }
 
@@ -144,10 +139,10 @@ void robot_wheels_set_permille(robot_drive_t *rb, int permille)
 {
     if (!rb || !rb->fl || !rb->fr || !rb->rl || !rb->rr) return;
     int p = clamp_permille_local(permille);
-    motor_set_permille(rb->fl, rb->pol_fl * p);
-    motor_set_permille(rb->fr, rb->pol_fr * p);
-    motor_set_permille(rb->rl, rb->pol_rl * p);
-    motor_set_permille(rb->rr, rb->pol_rr * p);
+    motor_set_permille(rb->fl, p);
+    motor_set_permille(rb->fr, p);
+    motor_set_permille(rb->rl, p);
+    motor_set_permille(rb->rr, p);
 }
 
 void robot_drive_forward(robot_drive_t *rb, int permille)
@@ -165,10 +160,10 @@ void robot_turn_left(robot_drive_t *rb, int permille)
     if (!rb || !rb->fl || !rb->fr || !rb->rl || !rb->rr) return;
     int p = clamp_permille_local(permille);
     int p_slow = scale_permille_local(p, rb->turn_slow_factor_permille);
-    motor_set_permille(rb->fl, rb->pol_fl * p_slow);
-    motor_set_permille(rb->rl, rb->pol_rl * p_slow);
-    motor_set_permille(rb->fr, rb->pol_fr * p);
-    motor_set_permille(rb->rr, rb->pol_rr * p);
+    motor_set_permille(rb->fl, p_slow);
+    motor_set_permille(rb->rl, p_slow);
+    motor_set_permille(rb->fr, -p);
+    motor_set_permille(rb->rr, -p);
 }
 
 void robot_turn_right(robot_drive_t *rb, int permille)
@@ -176,20 +171,20 @@ void robot_turn_right(robot_drive_t *rb, int permille)
     if (!rb || !rb->fl || !rb->fr || !rb->rl || !rb->rr) return;
     int p = clamp_permille_local(permille);
     int p_slow = scale_permille_local(p, rb->turn_slow_factor_permille);
-    motor_set_permille(rb->fl, rb->pol_fl * p);
-    motor_set_permille(rb->rl, rb->pol_rl * p);
-    motor_set_permille(rb->fr, rb->pol_fr * p_slow);
-    motor_set_permille(rb->rr, rb->pol_rr * p_slow);
+    motor_set_permille(rb->fl, p);
+    motor_set_permille(rb->rl, p);
+    motor_set_permille(rb->fr, p_slow);
+    motor_set_permille(rb->rr, p_slow);
 }
 
 void robot_rotate_in_place(robot_drive_t *rb, int permille)
 {
     if (!rb || !rb->fl || !rb->fr || !rb->rl || !rb->rr) return;
     int p = clamp_permille_local(permille);
-    motor_set_permille(rb->fl, rb->pol_fl * -p);
-    motor_set_permille(rb->rl, rb->pol_rl * -p);
-    motor_set_permille(rb->fr, rb->pol_fr * p);
-    motor_set_permille(rb->rr, rb->pol_rr * p);
+    motor_set_permille(rb->fl, -p);
+    motor_set_permille(rb->rl, -p);
+    motor_set_permille(rb->fr, p);
+    motor_set_permille(rb->rr, p);
 }
 
 void robot_stop(robot_drive_t *rb)

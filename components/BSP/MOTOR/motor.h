@@ -48,23 +48,19 @@ esp_err_t motor_stop_freewheel(motor_t *m);
 esp_err_t motor_brake(motor_t *m);
 
 /*
- * 统一小车控制接口（框架）：基于四轮电机与极性，提供方向/转向控制
+ * 统一小车控制接口（框架）：基于四轮电机，提供方向/转向控制
+ * 注意：双相PWM GPIO已重新定义，无需软件极性修正
  */
 typedef struct {
     motor_t *fl;  // 左前 Front-Left
     motor_t *fr;  // 右前 Front-Right
     motor_t *rl;  // 左后 Rear-Left
     motor_t *rr;  // 右后 Rear-Right
-    int pol_fl;   // 左前极性（+1/-1）
-    int pol_fr;   // 右前极性（+1/-1）
-    int pol_rl;   // 左后极性（+1/-1）
-    int pol_rr;   // 右后极性（+1/-1）
     int turn_slow_factor_permille; // 差速转向时内侧轮的速度比例（0..1000，默认500=50%）
 } robot_drive_t;
 
 void robot_init_drive(robot_drive_t *rb,
-                      motor_t *fl, motor_t *fr, motor_t *rl, motor_t *rr,
-                      int pol_fl, int pol_fr, int pol_rl, int pol_rr);
+                      motor_t *fl, motor_t *fr, motor_t *rl, motor_t *rr);
 
 void robot_set_turn_slow_factor(robot_drive_t *rb, int factor_permille);
 

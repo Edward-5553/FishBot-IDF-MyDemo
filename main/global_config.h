@@ -2,9 +2,22 @@
 #define __GLOBAL_CONFIG_H__
 
 // WIFI Configuration
+// 选择要使用的WiFi网络：取消注释对应的宏定义
+#define USE_HOME_WIFI    // 使用家里WiFi
+//#define USE_COMPANY_WIFI   // 使用公司WiFi
+
+#ifdef USE_COMPANY_WIFI
 #define WIFI_SSID "CEG-EDWARD-NB-1124"
 #define WIFI_PASS "yx341563"
-
+#elif defined(USE_HOME_WIFI)
+// 请确认以下信息是否正确：
+#define WIFI_SSID "Xiaomi_75D7"
+#define WIFI_PASS "yx341563"
+#else
+// 默认WiFi配置（如果上面两个都未定义）
+#define WIFI_SSID "Xiaomi_75D7"
+#define WIFI_PASS "yx341563"
+#endif
 // MicroROS Configuration 
 // Agent Configuration
 #define MICROROS_AGENT_IP "192.168.137.85"
@@ -20,17 +33,13 @@
 // 用户测试宏：置1启用MOTOR2占空70%并打印轮速，置0编译移除该测试代码
 #define MOTOR2_SPEED_TEST_ENABLE              0
 
-// 每个轮位的“逻辑正转”极性（+1：permille>0 为正转；-1：permille<0 为正转）（保留以支持后续方向控制）
-#define MOTOR_POL_FL (-1)
-#define MOTOR_POL_FR (+1)
-#define MOTOR_POL_RL (-1)
-#define MOTOR_POL_RR (+1)
+// 注意：双相PWM GPIO已重新定义，正负占空比时电机转动方向一致，无需软件极性修正
 
 // PID Configuration
 // 用户测试宏：置1启用车轮速度 PID 闭环控制（目标速度 m/s）。
-#define MOTOR2_PID_TEST_ENABLE                0
+#define MOTOR2_PID_TEST_ENABLE                1
 // PID 目标速度（m/s），请根据场景安全设置，初值偏保守
-#define PID_TARGET_SPEED_MPS                  0.5f
+#define PID_TARGET_SPEED_MPS                  0.25f
 // PID 初始增益（单位：输出permille/速度m/s），请按需要调参
 #define PID_KP                                600.0f
 #define PID_KI                                200.0f
@@ -54,8 +63,8 @@
 #define ENCODER_FL_ENABLE 1
 #if ENCODER_FL_ENABLE
   #define ENC_FL_PCNT_UNIT  PCNT_UNIT_1
-  #define ENC_FL_GPIO_A     GPIO_NUM_7
-  #define ENC_FL_GPIO_B     GPIO_NUM_6
+  #define ENC_FL_GPIO_A     GPIO_NUM_6
+  #define ENC_FL_GPIO_B     GPIO_NUM_7
   #define FL_PCNT_TEN_CIRCLE_COUNT 19618
 #endif
 
@@ -63,8 +72,8 @@
 #define ENCODER_RL_ENABLE 1
 #if ENCODER_RL_ENABLE
   #define ENC_RL_PCNT_UNIT  PCNT_UNIT_2
-  #define ENC_RL_GPIO_A     GPIO_NUM_19
-  #define ENC_RL_GPIO_B     GPIO_NUM_20
+  #define ENC_RL_GPIO_A     GPIO_NUM_20
+  #define ENC_RL_GPIO_B     GPIO_NUM_19
   #define RL_PCNT_TEN_CIRCLE_COUNT 20005
 #endif
 

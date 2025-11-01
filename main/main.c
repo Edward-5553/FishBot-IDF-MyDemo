@@ -57,7 +57,7 @@ static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
 static TickType_t s_last_tick = 0;
 /* 是否完成位姿初始对准（用加速度静态解算进行初始化） */
 static bool s_pose_initialized = false;
-static bool s_oled_ready = false;
+// static bool s_oled_ready = false;  // 暂时未使用，注释掉避免警告
 static float s_gbias_x = 0.0f, s_gbias_y = 0.0f, s_gbias_z = 0.0f; /* 陀螺零速偏移（dps） */
 static motor_t s_motor1, s_motor2, s_motor3, s_motor4;            /* 四路电机对象 */
 // 轮位映射：motor1=左前, motor2=右前, motor3=左后, motor4=右后（保留以支持后续方向控制）
@@ -79,6 +79,12 @@ static int s_counts_per_rev_cfg = 0;          // 右前轮每圈脉冲数（测�
 static int s_wifi_retry_num = 0;
 static const int WIFI_MAXIMUM_RETRY = 5;
 static bool s_wifi_connected = false;
+
+#if MOTOR2_PID_TEST_ENABLE
+static pid_controller_t s_pid_fl, s_pid_fr, s_pid_rl, s_pid_rr;  // 四轮 PID 控制器
+static bool s_pid_all_inited = false;                             // 是否已完成四轮 PID 初始化
+static TickType_t s_pid_last_tick = 0;                            // 统一 PID 采样周期计时
+#endif
 
 diff4_kinematics_cfg_t diff4_kinematics_cfg = {
     .track_width_m = TRACK_WIDTH_M,
@@ -407,11 +413,11 @@ void app_main(void) {
 
   // MOTOR 初始化（LEDC 低速模式，5kHz，13-bit），GPIO映射来自用户提供
   ESP_LOGI(TAG, "MOTOR 初始化...");
-  ret = motor_init(&s_motor1, GPIO_NUM_4,  GPIO_NUM_5,  LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
+  ret = motor_init(&s_motor1, GPIO_NUM_5,  GPIO_NUM_4,  LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
   if (ret != ESP_OK) ESP_LOGE(TAG, "Motor1 初始化失败: %s", esp_err_to_name(ret));
   ret = motor_init(&s_motor2, GPIO_NUM_15, GPIO_NUM_16, LEDC_CHANNEL_2, LEDC_CHANNEL_3, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
   if (ret != ESP_OK) ESP_LOGE(TAG, "Motor2 初始化失败: %s", esp_err_to_name(ret));
-  ret = motor_init(&s_motor3, GPIO_NUM_8,  GPIO_NUM_3,  LEDC_CHANNEL_4, LEDC_CHANNEL_5, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
+  ret = motor_init(&s_motor3, GPIO_NUM_3,  GPIO_NUM_8,  LEDC_CHANNEL_4, LEDC_CHANNEL_5, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
   if (ret != ESP_OK) ESP_LOGE(TAG, "Motor3 初始化失败: %s", esp_err_to_name(ret));
   ret = motor_init(&s_motor4, GPIO_NUM_46, GPIO_NUM_9,  LEDC_CHANNEL_6, LEDC_CHANNEL_7, LEDC_TIMER_0, LEDC_LOW_SPEED_MODE, PWM_DEFAULT_FREQ_HZ, PWM_DEFAULT_RESOLUTION);
   if (ret != ESP_OK) ESP_LOGE(TAG, "Motor4 初始化失败: %s", esp_err_to_name(ret));
@@ -434,8 +440,8 @@ void app_main(void) {
   motor_stop_freewheel(&s_motor3);
   motor_stop_freewheel(&s_motor4);
 
-  // 初始化统一驱动对象并保持停止
-  robot_init_drive(&s_rb, &MOTOR_FL, &MOTOR_FR, &MOTOR_RL, &MOTOR_RR, MOTOR_POL_FL, MOTOR_POL_FR, MOTOR_POL_RL, MOTOR_POL_RR);
+  // 初始化统一驱动对象并保持停止（双相PWM已保证方向一致性，无需极性参数）
+  robot_init_drive(&s_rb, &MOTOR_FL, &MOTOR_FR, &MOTOR_RL, &MOTOR_RR);
   robot_stop(&s_rb);
 
 #if ENCODER_FL_ENABLE
@@ -553,10 +559,10 @@ void app_main(void) {
 
     // 根据电机编码器获取各电机转速
     {
-      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) * MOTOR_POL_FL: 0.0f;
-      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) * MOTOR_POL_FR: 0.0f;
-      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) * MOTOR_POL_RL: 0.0f;
-      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) * MOTOR_POL_RR: 0.0f;
+      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
+      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) : 0.0f;
+      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
+      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
       // 只有在至少一个编码器存在时打印该汇总行
       if (s_enc_fl || s_enc_fr || s_enc_rl || s_enc_rr) {
         ESP_LOGI(TAG, "Wheels v[m/s]: FL=%s%.3f FR=%s%.3f RL=%s%.3f RR=%s%.3f",
@@ -613,20 +619,20 @@ void app_main(void) {
     if (out_rl < -1000) out_rl = -1000;
     if (out_rr > 1000) out_rr = 1000;
     if (out_rr < -1000) out_rr = -1000;
-    // 分别驱动四个轮子（统一驱动对象的极性映射由此体现）
-    motor_set_permille(&MOTOR_FL, MOTOR_POL_FL * out_fl);
-    motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * out_fr);
-    motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * out_rl);
-    motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * out_rr);
+    // 分别驱动四个轮子（双相PWM已保证方向一致性，无需极性修正）
+    motor_set_permille(&MOTOR_FL, out_fl);
+    motor_set_permille(&MOTOR_FR, out_fr);
+    motor_set_permille(&MOTOR_RL, out_rl);
+    motor_set_permille(&MOTOR_RR, out_rr);
     ESP_LOGI(TAG, "PID 4W: target=%.3f m/s | v_FL=%.3f v_FR=%.3f v_RL=%.3f v_RR=%.3f | out_FL/FR/RL/RR=%d/%d/%d/%d‰",
              PID_TARGET_SPEED_MPS, v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
 #endif
 
 #if 0
-    motor_set_permille(&MOTOR_FL, MOTOR_POL_FL * 500);
-    motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * 500);
-    motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * 500);
-    motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * 500);
+    motor_set_permille(&MOTOR_FL, MOTOR_POL_FL * 750);
+    motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * 750);
+    motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * 750);
+    motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * 750);
 #endif 
 
     // WiFi连接状态监控和重连机制

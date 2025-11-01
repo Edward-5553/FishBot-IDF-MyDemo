@@ -578,10 +578,10 @@ void app_main(void) {
 
     // 根据电机编码器获取各电机转速
     {
-      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) * MOTOR_POL_FL: 0.0f;
-      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) * MOTOR_POL_FR: 0.0f;
-      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) * MOTOR_POL_RL: 0.0f;
-      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) * MOTOR_POL_RR: 0.0f;
+      float v_fl = (s_enc_fl) ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
+      float v_fr = (s_enc_fr) ? s_enc_fr->get_speed_mps(s_enc_fr) : 0.0f;
+      float v_rl = (s_enc_rl) ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
+      float v_rr = (s_enc_rr) ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
       // 只有在至少一个编码器存在时打印该汇总行
       if (s_enc_fl || s_enc_fr || s_enc_rl || s_enc_rr) {
         ESP_LOGI(TAG, "Wheels v[m/s]: FL=%s%.3f FR=%s%.3f RL=%s%.3f RR=%s%.3f",
@@ -653,11 +653,11 @@ void app_main(void) {
     if (out_rl < -1000) out_rl = -1000;
     if (out_rr > 1000) out_rr = 1000;
     if (out_rr < -1000) out_rr = -1000;
-    // 分别驱动四个轮子（统一驱动对象的极性映射由此体现）
-    motor_set_permille(&MOTOR_FL, MOTOR_POL_FL * out_fl);
-    motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * out_fr);
-    motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * out_rl);
-    motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * out_rr);
+    // 分别驱动四个轮子（双相PWM已保证方向一致性，无需极性修正）
+    motor_set_permille(&MOTOR_FL, out_fl);
+    motor_set_permille(&MOTOR_FR, out_fr);
+    motor_set_permille(&MOTOR_RL, out_rl);
+    motor_set_permille(&MOTOR_RR, out_rr);
     ESP_LOGI(TAG, "PID 4W: target=%.3f m/s | v_FL=%.3f v_FR=%.3f v_RL=%.3f v_RR=%.3f | out_FL/FR/RL/RR=%d/%d/%d/%d‰",
              PID_TARGET_SPEED_MPS, v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
 #endif
