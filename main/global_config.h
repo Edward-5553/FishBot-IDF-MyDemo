@@ -9,19 +9,24 @@
 #ifdef USE_COMPANY_WIFI
 #define WIFI_SSID "CEG-EDWARD-NB-1124"
 #define WIFI_PASS "yx341563"
+// MicroROS Configuration 
+// Agent Configuration
+#define MICROROS_AGENT_IP "192.168.137.85"
+#define MICROROS_AGENT_PORT "8888"
 #elif defined(USE_HOME_WIFI)
 // 请确认以下信息是否正确：
 #define WIFI_SSID "Xiaomi_75D7"
 #define WIFI_PASS "yx341563"
+// MicroROS Configuration 
+// Agent Configuration
+#define MICROROS_AGENT_IP "192.168.31.50"
+#define MICROROS_AGENT_PORT "8888"
 #else
 // 默认WiFi配置（如果上面两个都未定义）
 #define WIFI_SSID "Xiaomi_75D7"
 #define WIFI_PASS "yx341563"
 #endif
-// MicroROS Configuration 
-// Agent Configuration
-#define MICROROS_AGENT_IP "192.168.137.85"
-#define MICROROS_AGENT_PORT "8888"
+
 
 // 新增：定义圆周率（若未定义）
 #ifndef M_PI
