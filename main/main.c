@@ -669,7 +669,7 @@ void app_main(void) {
     motor_set_permille(&MOTOR_FR, MOTOR_POL_FR * 750);
     motor_set_permille(&MOTOR_RL, MOTOR_POL_RL * 750);
     motor_set_permille(&MOTOR_RR, MOTOR_POL_RR * 750);
-#endif 
+ 
 
     // WiFi连接状态监控和重连机制
     static TickType_t last_wifi_check = 0;
@@ -686,6 +686,7 @@ void app_main(void) {
             ESP_LOGI(TAG, "WiFi连接正常");
         }
     }
+#endif
 
     vTaskDelay(pdMS_TO_TICKS(100));
   }
