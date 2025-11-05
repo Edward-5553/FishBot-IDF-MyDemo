@@ -653,28 +653,39 @@ void app_main(void) {
     float v_fl = s_enc_fl ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
     float v_rl = s_enc_rl ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
     float v_rr = s_enc_rr ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
-    // 计算四轮控制输出：使用 /cmd_vel 逆解得到的四轮目标速度作为设定值
-    int out_fl = (int)lroundf(pid_compute(&s_pid_fl, s_target_v_fl, v_fl, dt_pid));
-    int out_fr = (int)lroundf(pid_compute(&s_pid_fr, s_target_v_fr, v_fr, dt_pid));
-    int out_rl = (int)lroundf(pid_compute(&s_pid_rl, s_target_v_rl, v_rl, dt_pid));
-    int out_rr = (int)lroundf(pid_compute(&s_pid_rr, s_target_v_rr, v_rr, dt_pid));
-    // 输出限幅到 [-1000, 1000]，分行书写避免 -Werror=misleading-indentation
-    if (out_fl > 1000) out_fl = 1000;
-    if (out_fl < -1000) out_fl = -1000;
-    if (out_fr > 1000) out_fr = 1000;
-    if (out_fr < -1000) out_fr = -1000;
-    if (out_rl > 1000) out_rl = 1000;
-    if (out_rl < -1000) out_rl = -1000;
-    if (out_rr > 1000) out_rr = 1000;
-    if (out_rr < -1000) out_rr = -1000;
-    // 分别驱动四个轮子（双相PWM已保证方向一致性，无需极性修正）
-    motor_set_permille(&MOTOR_FL, out_fl);
-    motor_set_permille(&MOTOR_FR, out_fr);
-    motor_set_permille(&MOTOR_RL, out_rl);
-    motor_set_permille(&MOTOR_RR, out_rr);
-    ESP_LOGI(TAG, "PID 4W: tgt[m/s] FL=%.3f FR=%.3f RL=%.3f RR=%.3f | v[m/s] FL=%.3f FR=%.3f RL=%.3f RR=%.3f | out‰ FL/FR/RL/RR=%d/%d/%d/%d",
-             s_target_v_fl, s_target_v_fr, s_target_v_rl, s_target_v_rr,
-             v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
+    // 若四轮目标速度均接近 0，则直接停转并复位 PID，避免低速 PWM 嗡嗡声；否则进入 PID 控制
+    if (fabsf(s_target_v_fl) < 0.001f && fabsf(s_target_v_fr) < 0.001f &&
+        fabsf(s_target_v_rl) < 0.001f && fabsf(s_target_v_rr) < 0.001f) {
+        robot_stop(&s_rb);
+        pid_reset(&s_pid_fl);
+        pid_reset(&s_pid_fr);
+        pid_reset(&s_pid_rl);
+        pid_reset(&s_pid_rr);
+        ESP_LOGI(TAG, "PID 4W: target≈0 -> stop motors");
+    } else {
+        // 计算四轮控制输出：使用 /cmd_vel 逆解得到的四轮目标速度作为设定值
+        int out_fl = (int)lroundf(pid_compute(&s_pid_fl, s_target_v_fl, v_fl, dt_pid));
+        int out_fr = (int)lroundf(pid_compute(&s_pid_fr, s_target_v_fr, v_fr, dt_pid));
+        int out_rl = (int)lroundf(pid_compute(&s_pid_rl, s_target_v_rl, v_rl, dt_pid));
+        int out_rr = (int)lroundf(pid_compute(&s_pid_rr, s_target_v_rr, v_rr, dt_pid));
+        // 输出限幅到 [-1000, 1000]，分行书写避免 -Werror=misleading-indentation
+        if (out_fl > 1000) out_fl = 1000;
+        if (out_fl < -1000) out_fl = -1000;
+        if (out_fr > 1000) out_fr = 1000;
+        if (out_fr < -1000) out_fr = -1000;
+        if (out_rl > 1000) out_rl = 1000;
+        if (out_rl < -1000) out_rl = -1000;
+        if (out_rr > 1000) out_rr = 1000;
+        if (out_rr < -1000) out_rr = -1000;
+        // 分别驱动四个轮子（双相PWM已保证方向一致性，无需极性修正）
+        motor_set_permille(&MOTOR_FL, out_fl);
+        motor_set_permille(&MOTOR_FR, out_fr);
+        motor_set_permille(&MOTOR_RL, out_rl);
+        motor_set_permille(&MOTOR_RR, out_rr);
+        ESP_LOGI(TAG, "PID 4W: tgt[m/s] FL=%.3f FR=%.3f RL=%.3f RR=%.3f | v[m/s] FL=%.3f FR=%.3f RL=%.3f RR=%.3f | out‰ FL/FR/RL/RR=%d/%d/%d/%d",
+                 s_target_v_fl, s_target_v_fr, s_target_v_rl, s_target_v_rr,
+                 v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
+    }
 #endif
 
 #if 0
