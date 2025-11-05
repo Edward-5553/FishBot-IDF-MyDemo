@@ -42,7 +42,7 @@
 
 // PID Configuration
 // 用户测试宏：置1启用车轮速度 PID 闭环控制（目标速度 m/s）。
-#define MOTOR2_PID_TEST_ENABLE                0
+#define MOTOR2_PID_TEST_ENABLE                1
 // PID 目标速度（m/s），请根据场景安全设置，初值偏保守
 #define PID_TARGET_SPEED_MPS                  0.30f
 // PID 初始增益（单位：输出permille/速度m/s），请按需要调参

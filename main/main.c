@@ -87,6 +87,11 @@ static bool s_wifi_connected = false;
 static pid_controller_t s_pid_fl, s_pid_fr, s_pid_rl, s_pid_rr;  // 四轮 PID 控制器
 static bool s_pid_all_inited = false;                             // 是否已完成四轮 PID 初始化
 static TickType_t s_pid_last_tick = 0;                            // 统一 PID 采样周期计时
+// 四轮目标速度（m/s），由 /cmd_vel 逆运动学计算得到
+static float s_target_v_fl = 0.0f;
+static float s_target_v_fr = 0.0f;
+static float s_target_v_rl = 0.0f;
+static float s_target_v_rr = 0.0f;
 #endif
 
 diff4_kinematics_cfg_t diff4_kinematics_cfg = {
@@ -240,8 +245,15 @@ static void cmd_vel_callback(const void * msgin)
     const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *) msgin;
     linear_x = msg->linear.x;
     angular_z = msg->angular.z;
-    ESP_LOGI(TAG, "收到速度指令: vx=%.3f, omega=%.3f", linear_x, angular_z);
-    // 如需联动驱动层，可在此触发目标速度更新（当前保持只赋值，不改变驱动逻辑）
+    ESP_LOGI(TAG, "收到速度指令: vx=%.3f m/s, omega=%.3f rad/s", linear_x, angular_z);
+
+    // 使用四轮差速逆运动学：将机器人期望 vx/omega 映射为四个轮子的线速度（m/s）
+#if MOTOR2_PID_TEST_ENABLE
+    diff4_inverse_mps(&diff4_kinematics_cfg, linear_x, angular_z,
+                      &s_target_v_fl, &s_target_v_fr, &s_target_v_rl, &s_target_v_rr);
+    ESP_LOGI(TAG, "CMD 4W target v[m/s]: FL=%.3f FR=%.3f RL=%.3f RR=%.3f",
+             s_target_v_fl, s_target_v_fr, s_target_v_rl, s_target_v_rr);
+#endif
 }
 
 // Publish velocity message to micro-ROS
@@ -641,11 +653,11 @@ void app_main(void) {
     float v_fl = s_enc_fl ? s_enc_fl->get_speed_mps(s_enc_fl) : 0.0f;
     float v_rl = s_enc_rl ? s_enc_rl->get_speed_mps(s_enc_rl) : 0.0f;
     float v_rr = s_enc_rr ? s_enc_rr->get_speed_mps(s_enc_rr) : 0.0f;
-    // 计算四轮控制输出
-    int out_fl = (int)lroundf(pid_compute(&s_pid_fl, PID_TARGET_SPEED_MPS, v_fl, dt_pid));
-    int out_fr = (int)lroundf(pid_compute(&s_pid_fr, PID_TARGET_SPEED_MPS, v_fr, dt_pid));
-    int out_rl = (int)lroundf(pid_compute(&s_pid_rl, PID_TARGET_SPEED_MPS, v_rl, dt_pid));
-    int out_rr = (int)lroundf(pid_compute(&s_pid_rr, PID_TARGET_SPEED_MPS, v_rr, dt_pid));
+    // 计算四轮控制输出：使用 /cmd_vel 逆解得到的四轮目标速度作为设定值
+    int out_fl = (int)lroundf(pid_compute(&s_pid_fl, s_target_v_fl, v_fl, dt_pid));
+    int out_fr = (int)lroundf(pid_compute(&s_pid_fr, s_target_v_fr, v_fr, dt_pid));
+    int out_rl = (int)lroundf(pid_compute(&s_pid_rl, s_target_v_rl, v_rl, dt_pid));
+    int out_rr = (int)lroundf(pid_compute(&s_pid_rr, s_target_v_rr, v_rr, dt_pid));
     // 输出限幅到 [-1000, 1000]，分行书写避免 -Werror=misleading-indentation
     if (out_fl > 1000) out_fl = 1000;
     if (out_fl < -1000) out_fl = -1000;
@@ -660,8 +672,9 @@ void app_main(void) {
     motor_set_permille(&MOTOR_FR, out_fr);
     motor_set_permille(&MOTOR_RL, out_rl);
     motor_set_permille(&MOTOR_RR, out_rr);
-    ESP_LOGI(TAG, "PID 4W: target=%.3f m/s | v_FL=%.3f v_FR=%.3f v_RL=%.3f v_RR=%.3f | out_FL/FR/RL/RR=%d/%d/%d/%d‰",
-             PID_TARGET_SPEED_MPS, v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
+    ESP_LOGI(TAG, "PID 4W: tgt[m/s] FL=%.3f FR=%.3f RL=%.3f RR=%.3f | v[m/s] FL=%.3f FR=%.3f RL=%.3f RR=%.3f | out‰ FL/FR/RL/RR=%d/%d/%d/%d",
+             s_target_v_fl, s_target_v_fr, s_target_v_rl, s_target_v_rr,
+             v_fl, v_fr, v_rl, v_rr, out_fl, out_fr, out_rl, out_rr);
 #endif
 
 #if 0
