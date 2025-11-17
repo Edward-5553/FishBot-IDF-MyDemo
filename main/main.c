@@ -32,6 +32,7 @@
 #include <rcl/error_handling.h>
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
+#include <nav_msgs/msg/odometry.h>
 #include <rmw_microros/rmw_microros.h>
 #include "lwip/ip4_addr.h"
 ////// MicroROS Part <<<<<<
@@ -46,13 +47,19 @@ static rclc_support_t support;
 static rcl_node_t node;
 static rclc_executor_t executor;
 static rcl_publisher_t publisher;
+static rcl_publisher_t odom_publisher;
 static rcl_subscription_t cmd_vel_subscriber;
 
 static geometry_msgs__msg__Twist velocity_msg;
 static geometry_msgs__msg__Twist cmd_vel_twist;
+static nav_msgs__msg__Odometry odom_msg;
 
 static float robot_linear_x = 0.0f; // 机器人线速度（x 轴）  // 沿 x 轴
 static float robot_angular_z = 0.0f; // 机器人角速度（z 轴） // 绕 z 轴
+
+/* 里程计位姿状态（x,y,theta），单位：x/y[m]，theta[rad] */
+static float s_odom_x = 0.0f, s_odom_y = 0.0f, s_odom_theta = 0.0f;
+static TickType_t s_odom_last_tick = 0; // 里程计积分计时
 
 /* IMU 位姿滤波状态（Roll/Pitch/Yaw，单位：度） */
 static float s_roll = 0.0f, s_pitch = 0.0f, s_yaw = 0.0f;
@@ -273,6 +280,59 @@ static void publish_velocity(float vx, float omega)
     }
 }
 
+// 发布里程计 /odom
+static void publish_odom()
+{
+    // 填充 header（此处不含精确时间源，先不设置 stamp）
+    odom_msg.header.frame_id.data = (char*)"odom";
+    odom_msg.header.frame_id.size = 5; // 包含字符串长度信息
+    odom_msg.child_frame_id.data = (char*)"base_link";
+    odom_msg.child_frame_id.size = 9;
+
+    // 位姿：x,y,theta -> 四元数
+    odom_msg.pose.pose.position.x = s_odom_x;
+    odom_msg.pose.pose.position.y = s_odom_y;
+    odom_msg.pose.pose.position.z = 0.0;
+    float half_yaw = 0.5f * s_odom_theta;
+    odom_msg.pose.pose.orientation.x = 0.0f;
+    odom_msg.pose.pose.orientation.y = 0.0f;
+    odom_msg.pose.pose.orientation.z = sinf(half_yaw);
+    odom_msg.pose.pose.orientation.w = cosf(half_yaw);
+
+    // 速度（与 /robot/velocity 一致）：linear.x m/s, angular.z rad/s
+    odom_msg.twist.twist.linear.x = robot_linear_x;
+    odom_msg.twist.twist.linear.y = 0.0f;
+    odom_msg.twist.twist.linear.z = 0.0f;
+    odom_msg.twist.twist.angular.x = 0.0f;
+    odom_msg.twist.twist.angular.y = 0.0f;
+    odom_msg.twist.twist.angular.z = robot_angular_z;
+
+    // 协方差（示例：保守设定。实际应根据编码器与地面情况标定）
+    for (int i = 0; i < 36; ++i) {
+        odom_msg.pose.covariance[i] = 0.0;
+        odom_msg.twist.covariance[i] = 0.0;
+    }
+    // 位置协方差：x/y 较小，z/roll/pitch 很大，yaw 中等
+    odom_msg.pose.covariance[0] = 0.05;   // x
+    odom_msg.pose.covariance[7] = 0.05;   // y
+    odom_msg.pose.covariance[14] = 1e3;   // z
+    odom_msg.pose.covariance[21] = 1e3;   // roll
+    odom_msg.pose.covariance[28] = 1e3;   // pitch
+    odom_msg.pose.covariance[35] = 0.2;   // yaw
+    // 速度协方差：linear.x 与 angular.z 小，其它大
+    odom_msg.twist.covariance[0] = 0.02;  // vx
+    odom_msg.twist.covariance[7] = 1e2;   // vy
+    odom_msg.twist.covariance[14] = 1e2;  // vz
+    odom_msg.twist.covariance[21] = 1e2;  // wx
+    odom_msg.twist.covariance[28] = 1e2;  // wy
+    odom_msg.twist.covariance[35] = 0.1;  // wz
+
+    rcl_ret_t ret = rcl_publish(&odom_publisher, &odom_msg, NULL);
+    if (ret != RCL_RET_OK) {
+        ESP_LOGW(TAG, "micro-ROS 发布里程计失败: 0x%x", ret);
+    }
+}
+
 // MicroROS Related Function
 static bool microros_init(void)
 {
@@ -327,6 +387,16 @@ static bool microros_init(void)
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/robot/velocity") != RCL_RET_OK) {
         ESP_LOGE(TAG, "rclc_publisher_init_default 失败");
+        return false;
+    }
+
+    // 创建里程计发布者（/odom）
+    if (rclc_publisher_init_default(
+        &odom_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
+        "/odom") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "rclc_publisher_init_default(odom) 失败");
         return false;
     }
     
@@ -549,6 +619,7 @@ void app_main(void) {
 
   /* 初始化积分计时 */
   s_last_tick = xTaskGetTickCount();
+  s_odom_last_tick = s_last_tick;
 
   while (1) {
     LED_TOGGLE();
@@ -623,6 +694,13 @@ void app_main(void) {
       diff4_forward_mps(&diff4_kinematics_cfg, v_fl, v_fr, v_rl, v_rr, &robot_linear_x, &robot_angular_z);
       //diff4_forward_rads(&diff4_kinematics_cfg, robot_linear_x, robot_angular_z, &v_fl, &v_fr, &v_rl, &v_rr);
       publish_velocity(robot_linear_x, robot_angular_z);
+      // 里程计位姿积分（使用编码器推导出的 vx/omega）：x+=vx*cos(theta)*dt, y+=vx*sin(theta)*dt, theta+=omega*dt
+      float dt_odom = ((float)(s_last_tick - s_odom_last_tick)) * (portTICK_PERIOD_MS / 1000.0f);
+      s_odom_last_tick = s_last_tick;
+      s_odom_x += robot_linear_x * cosf(s_odom_theta) * dt_odom;
+      s_odom_y += robot_linear_x * sinf(s_odom_theta) * dt_odom;
+      s_odom_theta += robot_angular_z * dt_odom;
+      publish_odom();
       rclc_executor_spin_some(&executor, pdMS_TO_TICKS(10));
       ESP_LOGI(TAG, "Robot velocity: linear_x=%.3f m/s", robot_linear_x);
     }
